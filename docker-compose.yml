@@ -1,0 +1,81 @@
+# ORACLE — docker compose for local testing (Step 18)
+#
+# Usage:
+#   cp .env.example .env          # fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, etc.
+#   docker compose build           # builds the image (first run ~2-3 min)
+#   docker compose up -d           # starts bot in background
+#   docker compose logs -f oracle  # tail logs
+#   docker compose exec oracle bash   # shell into container for debugging
+#   docker compose down            # stop (volume persists)
+#   docker compose down -v         # stop + wipe volume (DESTRUCTIVE)
+#
+# The 'oracle-data' volume persists across restarts:
+#   - oracle.db           (LangGraph checkpoints)
+#   - oracle_data.db      (signals / feedback / topic_timeline / user_sources /
+#                          learning_weights / llm_cost_log)
+#   - oracle_reader.session  (Telethon login, if you ran auth-tg)
+
+services:
+  oracle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: oracle:latest
+    container_name: oracle-bot
+    restart: unless-stopped
+
+    # Loads every key from .env directly — no hardcoding of secrets in this file
+    env_file:
+      - .env
+
+    environment:
+      # Override or supplement .env with container-specific values
+      TZ: Europe/Warsaw
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    volumes:
+      # Persistent state — DBs and Telethon session survive container rebuilds
+      - oracle-data:/app/data
+
+    # Healthcheck repeats the Dockerfile's HEALTHCHECK but docker compose
+    # reports unhealthy state via `docker compose ps`
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sqlite3; sqlite3.connect('oracle_data.db').execute('SELECT 1').fetchone()"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 60s
+
+    # Read-only rootfs + tmpfs for /tmp is a hardening best practice,
+    # but our app writes pyc files — disable for simplicity in Step 18.
+    # Uncomment if you want extra hardening:
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+
+    # Resource caps (matches the Azure Container Apps budget target)
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+    # Logging — rotate so a chatty scheduler doesn't fill the host disk
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  oracle-data:
+    driver: local

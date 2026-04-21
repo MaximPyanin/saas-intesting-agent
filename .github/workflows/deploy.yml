@@ -1,0 +1,140 @@
+name: Deploy ORACLE to Azure Container Apps
+
+# ============================================================================
+# ORACLE CI/CD — Step 19
+# ============================================================================
+# Triggers:
+#   - push to main                  → build + push + deploy
+#   - workflow_dispatch (manual)    → same, on-demand
+#
+# What it does:
+#   1. Checks out the repo
+#   2. Logs into Azure via OIDC (no long-lived secrets in GitHub)
+#   3. Builds the Docker image via Azure Container Registry Tasks
+#      (runs in Azure, no local Docker needed, faster than GHA runners)
+#   4. Updates the Container App revision with the new image tag
+#   5. The Container App automatically rolls out the new revision
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   AZURE_CLIENT_ID          — service principal client ID (OIDC)
+#   AZURE_TENANT_ID          — Azure tenant ID
+#   AZURE_SUBSCRIPTION_ID    — subscription ID
+#   AZURE_RESOURCE_GROUP     — e.g. oracle-rg
+#   AZURE_CONTAINER_REGISTRY — ACR name (NOT the FQDN)
+#   AZURE_CONTAINER_APP      — Container App name, e.g. oracle-bot
+#
+# To set up the service principal + federated credential, see DEPLOYMENT.md.
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Only trigger when something runtime-relevant changed — avoids
+      # unnecessary deploys when editing docs or CI config.
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC login to Azure
+  contents: read
+
+concurrency:
+  # Cancel in-progress deploys when a new one starts (avoid racing revisions)
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: oracle
+
+jobs:
+  build-and-deploy:
+    name: Build image + deploy to Container Apps
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set image tags
+        id: tags
+        run: |
+          SHA_TAG="${GITHUB_SHA::7}"
+          echo "sha_tag=$SHA_TAG" >> "$GITHUB_OUTPUT"
+          echo "full_image_sha=${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${IMAGE_NAME}:${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "full_image_latest=${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${IMAGE_NAME}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build image via ACR Tasks
+        # ACR Tasks runs the build in Azure — faster than GHA + no docker daemon
+        # needed on the runner. Two tags: git SHA (immutable) + latest.
+        run: |
+          az acr build \
+            --registry ${{ secrets.AZURE_CONTAINER_REGISTRY }} \
+            --image ${IMAGE_NAME}:${{ steps.tags.outputs.sha_tag }} \
+            --image ${IMAGE_NAME}:latest \
+            --file Dockerfile \
+            .
+
+      - name: Update Container App revision
+        # Point the app at the new SHA-tagged image. Container Apps
+        # automatically spins up a new revision and shifts traffic.
+        run: |
+          az containerapp update \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --image ${{ steps.tags.outputs.full_image_sha }} \
+            --output none
+
+      - name: Wait for new revision healthy
+        run: |
+          APP_NAME="${{ secrets.AZURE_CONTAINER_APP }}"
+          RG="${{ secrets.AZURE_RESOURCE_GROUP }}"
+
+          for i in {1..30}; do
+            STATE=$(az containerapp revision list \
+              --name "$APP_NAME" \
+              --resource-group "$RG" \
+              --query "[?properties.active==\`true\`] | [0].properties.runningState" \
+              -o tsv 2>/dev/null || echo "Unknown")
+            echo "[$i/30] Active revision state: $STATE"
+            if [[ "$STATE" == "Running" ]]; then
+              echo "✓ Revision healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "⚠ Revision did not reach Running state in 5 minutes"
+          exit 1
+
+      - name: Print recent logs
+        if: always()
+        run: |
+          az containerapp logs show \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --tail 50 || true
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          {
+            echo "### ✅ ORACLE deployed"
+            echo
+            echo "- **Image:** \`${{ steps.tags.outputs.full_image_sha }}\`"
+            echo "- **Container App:** \`${{ secrets.AZURE_CONTAINER_APP }}\`"
+            echo "- **Revision:** git SHA \`${{ steps.tags.outputs.sha_tag }}\`"
+            echo "- **Time:** $(date -u '+%Y-%m-%d %H:%M UTC')"
+          } >> "$GITHUB_STEP_SUMMARY"

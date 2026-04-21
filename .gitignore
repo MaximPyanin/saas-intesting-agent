@@ -61,6 +61,16 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# ORACLE
+oracle.db
+oracle.db-shm
+oracle.db-wal
+oracle_data.db
+oracle_data.db-shm
+oracle_data.db-wal
+oracle_reader.session
+oracle_reader.session-journal
+
 # Flask stuff:
 instance/
 .webassets-cache

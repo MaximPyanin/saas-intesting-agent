@@ -1,0 +1,95 @@
+# ORACLE .dockerignore — excluded from docker build context
+# Keep the build tight: no caches, no local state, no secrets.
+
+# ----- Python build artifacts -----
+__pycache__
+*.py[cod]
+*.pyo
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ----- Virtual environment (we build fresh inside the image) -----
+.venv
+venv
+env
+ENV
+
+# ----- uv / pip caches -----
+.uv-cache
+.pip-cache
+
+# ----- Version control -----
+.git
+.gitignore
+.gitattributes
+
+# ----- IDE / editor -----
+.idea
+.vscode
+.cursorignore
+*.swp
+*.swo
+*~
+
+# ----- Test / CI caches -----
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+.hypothesis
+
+# ----- ORACLE local state (persistent data — belongs in volume, not image) -----
+oracle.db
+oracle.db-shm
+oracle.db-wal
+oracle.db-journal
+oracle_data.db
+oracle_data.db-shm
+oracle_data.db-wal
+oracle_data.db-journal
+oracle_reader.session
+oracle_reader.session-journal
+
+# ----- Secrets -----
+.env
+.env.local
+.env.*.local
+
+# ----- Logs -----
+*.log
+logs/
+
+# ----- Documentation / misc (not needed at runtime) -----
+docs/
+*.md
+!README.md
+LICENSE
+.claude
+CLAUDE.md
+
+# ----- Docker files themselves -----
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml

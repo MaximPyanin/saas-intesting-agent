@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(ls -la oracle.db*)",
+      "Bash(ls -la oracle_data.db*)",
+      "Bash(uv run python -c \":*)",
+      "Bash(docker --version)",
+      "Bash(docker compose:*)",
+      "Bash(uv lock:*)",
+      "Bash(docker build:*)",
+      "Bash(hadolint --version)"
+    ]
+  }
+}
