@@ -276,6 +276,9 @@ async def check_all_rules(market: dict) -> list[AlertHit]:
 
     Returns hits that are NOT in the dedup window. One failing rule check
     never blocks the others (isolated try/except per rule).
+
+    ALSO checks the watchlist: every asset Maksim tapped 📌 Watch on gets
+    compared to its baseline price; ±5% drift fires a custom alert.
     """
     last = await get_last_snapshot()
     hits: list[AlertHit] = []
@@ -291,7 +294,88 @@ async def check_all_rules(market: dict) -> list[AlertHit]:
             log.debug("alerts: rule %s in dedup window, skipping", rule_id)
             continue
         hits.append(hit)
+
+    # Watchlist alerts — fired once per asset per WATCHLIST_DEDUP_HOURS
+    try:
+        from .watchlist import check_watchlist_for_alerts, mark_watch_fired  # noqa: PLC0415
+        watch_hits = await check_watchlist_for_alerts(market)
+        for w in watch_hits:
+            asset = w["asset"]
+            drift = w["drift_pct"]
+            direction = "🟢 пробил вверх" if drift >= 0 else "🔴 просел"
+            hits.append(AlertHit(
+                rule_id=f"watch:{asset}",
+                priority="HIGH" if abs(drift) >= 10 else "MEDIUM",
+                asset=asset,
+                current_value=w["current_price"],
+                title=f"📌 Watch · {asset} {direction} {drift:+.1f}%",
+                details=(
+                    f"Ты watch'ил <b>{asset}</b> на $<b>{w['baseline_price']:.2f}</b>.\n"
+                    f"Сейчас $<b>{w['current_price']:.2f}</b> ({drift:+.1f}% от baseline).\n\n"
+                    f"<i>Проверь сетап — может пора действовать или снять с watch.</i>"
+                ),
+            ))
+            await mark_watch_fired(asset)
+    except Exception as e:  # noqa: BLE001
+        log.warning("alerts: watchlist check failed: %s", e)
+
     return hits
+
+
+async def get_active_alerts_no_dedup(market: dict) -> list[AlertHit]:
+    """Check every alert rule against `market` ignoring the dedup window.
+
+    Used by the morning brief at 07:00 — Maksim asked for a "🚨 СРОЧНО"
+    section that shows whatever is hot RIGHT NOW, even if the alert
+    already fired during the night via the 15-min poll loop.
+
+    Does NOT update any dedup state — pure read.
+    """
+    last = await get_last_snapshot()
+    hits: list[AlertHit] = []
+    for rule_id, checker in ALERT_RULES.items():
+        try:
+            hit = checker(market, last)
+        except Exception as e:  # noqa: BLE001
+            log.error("alerts: rule %s check failed (no-dedup): %s", rule_id, e)
+            continue
+        if hit:
+            hits.append(hit)
+    # Sort: HIGH first, then MEDIUM, then LOW
+    priority_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    hits.sort(key=lambda h: priority_rank.get(h.priority, 9))
+    return hits
+
+
+async def get_recently_fired_alerts(hours: int = 12) -> list[dict]:
+    """Read which alert rules fired in the last `hours` from learning_weights.
+
+    Returns a list of dicts {rule_id, fired_at} — used by the morning brief
+    to show overnight activity even if the rule has since reset (e.g. VIX
+    spiked at 03:00 then settled by 07:00).
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    out: list[dict] = []
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT key, text_value FROM learning_weights WHERE key LIKE 'alerts:last_fired:%'"
+        ) as cur:
+            rows = await cur.fetchall()
+    for row in rows:
+        key = row[0] if isinstance(row, tuple) else row["key"]
+        ts = row[1] if isinstance(row, tuple) else row["text_value"]
+        if not ts:
+            continue
+        try:
+            fired_at = datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        if fired_at < cutoff:
+            continue
+        rule_id = key[len("alerts:last_fired:"):]
+        out.append({"rule_id": rule_id, "fired_at": fired_at})
+    out.sort(key=lambda r: r["fired_at"], reverse=True)
+    return out
 
 
 PRIORITY_EMOJI = {

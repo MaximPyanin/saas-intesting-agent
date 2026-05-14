@@ -93,6 +93,12 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-mini-2025-04-14":   (0.40, 1.60),
     "gpt-4.1-nano":              (0.10, 0.40),
     "gpt-4.1-nano-2025-04-14":   (0.10, 0.40),
+    # GPT-5.4 family (Maksim's current Azure deployments)
+    "gpt-5.4":                   (3.00, 12.00),
+    "gpt-5.4-2026-03-05":        (3.00, 12.00),
+    "gpt-5.4-mini":              (0.20,  0.80),
+    "gpt-5.4-mini-2026-03-17":   (0.20,  0.80),
+    "gpt-5.4-nano":              (0.05,  0.20),
 }
 
 
@@ -185,6 +191,13 @@ def get_openai_client(agent: str = "") -> Any:
     """
     settings = get_settings()
 
+    # Hard timeout for every LLM call — prevents the bot from hanging when
+    # Azure / OpenAI lazes on a complex structured-output request. 120 s is
+    # generous (most calls finish in 5-15 s) but short enough to fail fast.
+    # On timeout the SDK raises APITimeoutError which agent code catches and
+    # gracefully degrades (e.g. returns empty scenarios list).
+    LLM_TIMEOUT_SECONDS = 120.0
+
     # ---------- Azure OpenAI / Azure AI Foundry path ----------
     if settings.azure_openai_endpoint:
         if not settings.azure_openai_api_key:
@@ -196,6 +209,8 @@ def get_openai_client(agent: str = "") -> Any:
             azure_endpoint=settings.azure_openai_endpoint,
             api_key=settings.azure_openai_api_key,
             api_version=settings.azure_openai_api_version,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=1,  # don't retry hung Azure requests for 5 minutes
         )
 
     # ---------- OpenAI direct path ----------
@@ -207,10 +222,18 @@ def get_openai_client(agent: str = "") -> Any:
 
     if _try_langfuse_available():
         from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI  # noqa: PLC0415
-        return LangfuseAsyncOpenAI(api_key=settings.openai_api_key)
+        return LangfuseAsyncOpenAI(
+            api_key=settings.openai_api_key,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=1,
+        )
 
     from openai import AsyncOpenAI  # noqa: PLC0415
-    return AsyncOpenAI(api_key=settings.openai_api_key)
+    return AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=1,
+    )
 
 
 # ============================================================================

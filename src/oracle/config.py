@@ -34,8 +34,11 @@ class Settings(BaseSettings):
     # `openai_model_heavy` / `openai_model_light` are interpreted as
     # Azure DEPLOYMENT NAMES (not model family names).
     openai_api_key: str = ""
-    openai_model_heavy: str = "gpt-4o"
-    openai_model_light: str = "gpt-4o-mini"
+    # When Azure is used, these are DEPLOYMENT names in Azure AI Foundry.
+    # Defaults match Maksim's Azure deployments (gpt-5.4 + gpt-5.4-mini).
+    # Override per environment via .env if your deployments are named differently.
+    openai_model_heavy: str = "gpt-5.4"
+    openai_model_light: str = "gpt-5.4-mini"
 
     # ----- Azure OpenAI / Azure AI Foundry (optional alternative to OpenAI) -----
     # If set, observability uses AsyncAzureOpenAI instead of AsyncOpenAI.

@@ -70,6 +70,15 @@ class BusinessIdea(BaseModel):
     """EMERGING | GROWING | PEAK | DECLINING"""
     window_months: int
     """How many months before opportunity closes"""
+    industry: str = "other"
+    """Industry / vertical tag. One of:
+    health, fitness_sport, education, marketing_adtech, fintech,
+    ecommerce_retail, entertainment_media, productivity, dev_tools,
+    creator_economy, b2b_services, saas, ai_tools, hr_recruiting,
+    legaltech, travel_hospitality, real_estate, food_beverage, other.
+
+    Used for cross-digest diversity — the final selector picks 3 ideas
+    from 3 DIFFERENT industries."""
     competitors: list[str] = Field(default_factory=list)
     """Filled by validator (Step 12)"""
     verdict: str = "PASS"
@@ -130,23 +139,75 @@ class InvestmentSignal(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     asset: str
-    """e.g. 'BTC', 'S&P500', 'XAU/USD', 'NVDA'"""
-    signal_type: str
-    """e.g. 'Macro Momentum', 'Sector Rotation', 'Defensive Hedge'"""
+    """e.g. 'BTC', 'CSPX', 'NUCL', 'NVDA'"""
+    signal_type: str = "General"
+    """Kept for sorting/grouping; no longer rendered to the user."""
     price: float
-    change_24h: float
-    """percentage, signed"""
-    change_7d: float
-    """percentage, signed"""
-    strength: int = Field(ge=1, le=10)
-    timeframe: str
-    """e.g. '3-6 months'"""
-    bull_scenario: str
-    bull_prob: int = Field(ge=0, le=100)
-    bull_trigger: str
-    bear_scenario: str
-    bear_prob: int = Field(ge=0, le=100)
-    bear_trigger: str
+    """Live USD price (already FX-converted for EU UCITS)."""
+    change_24h: float = 0.0
+    """percentage, signed — shown next to price"""
+    change_7d: float = 0.0
+    """percentage, signed — kept for logic, not rendered"""
+    strength: int = Field(default=5, ge=1, le=10)
+    """Internal scoring (1-10) for ranking. Not rendered."""
+    timeframe: str = "1-3 months"
+    """Internal hint for the LLM. Not rendered."""
+
+    # ===== New minimal card structure (Maksim's redesign) =====
+    # Card = news + future + 2 critics + verdict. Everything else dropped.
+
+    news_highlights: list[str] = Field(default_factory=list)
+    """2-3 СВЕЖИХ новости / факта про актив или сектор. Каждый — одна строка.
+    Берутся из синтезированных кластеров или signals DB. Не выдумывать."""
+
+    trend: str = ""
+    """📊 Куда дует ветер ПРЯМО СЕЙЧАС — 1-2 предложения о текущем momentum,
+    consolidation или breakdown. Описание НАСТОЯЩЕГО, не будущего. Пример:
+    'Сектор урана откатился -5% за день после публикации USDA reports, но
+    7d momentum остаётся +18% — техническая просадка в бычьем тренде, не
+    смена режима.'"""
+
+    critic_bull: str = ""
+    """🐂 Мнение бычьего критика — 1-2 предложения. Конкретный аргумент ЗА.
+    Пример: 'AI-PPA структурно перепрошивают кривую спроса на 10 лет;
+    $13bn уже подписано. Просадка — точка входа.'"""
+
+    critic_bear: str = ""
+    """🐻 Мнение медвежьего критика — 1-2 предложения. Конкретный аргумент ПРОТИВ.
+    Пример: 'Уран в верхней 6-летней четверти. Откат Казахстана крошит
+    тренд на 30% за неделю, как в 2007.'"""
+
+    prediction: str = ""
+    """🔮 Краткосрочный прогноз — что ОЖИДАЕТСЯ в ближайшие 1-4 недели.
+    Конкретно: ближайший катализатор, целевой уровень/диапазон, что
+    переключит режим. Пример (NUCL): 'Жду консолидацию $44-48 до MSFT-CEG
+    PPA update; пробой $50 на объёме открывает путь к $58.'
+    1-2 предложения. Это самое ближнее будущее (trade horizon)."""
+
+    prediction_mid: str = ""
+    """🗓️ Среднесрочный прогноз 1-3 месяца. Тренд сектора + ключевые
+    катализаторы (CPI, FOMC, earnings, OPEC+). Пример (NUCL):
+    '1-3 месяца жду диапазон $48-60 при стабильных AI-PPA новостях;
+    провал ниже $45 на новостях supply chain Казахстана.'"""
+
+    prediction_long: str = ""
+    """📅 Долгосрочный прогноз 1-3 года. Структурный тренд / инвест-теза.
+    Пример (NUCL): 'На 1-3 года уран структурно поддержан AI-инфраструктурой
+    и nuclear renaissance; целевой диапазон $80-110 при подтверждении
+    нескольких PPA-сделок ежегодно.'"""
+
+    # ----- Legacy alias kept so old checkpoints don't break on load -----
+    future_outlook: str = ""
+
+    # ===== Legacy fields — schema-compat only, NOT rendered, NOT generated =====
+    market_situation: str = ""
+    critic_risk: str = ""
+    bull_scenario: str = ""
+    bull_prob: int = Field(default=50, ge=0, le=100)
+    bull_trigger: str = ""
+    bear_scenario: str = ""
+    bear_prob: int = Field(default=50, ge=0, le=100)
+    bear_trigger: str = ""
     key_events: list[str] = Field(default_factory=list)
     geopolitical_note: str = ""
 

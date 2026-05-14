@@ -49,25 +49,84 @@ log = logging.getLogger(__name__)
 # Source catalogs
 # ============================================================================
 
-# Reddit subreddits — heavily biased toward business idea sources (per user
-# priority: 70% ideas / 30% investments). r/MachineLearning + r/LocalLLaMA
-# match Maksim's RAG/LLM expertise edge.
+# Reddit subreddits — biased toward business idea sources (per user priority:
+# 70% ideas / 30% investments). Spans MANY industries so the synthesizer has
+# breadth: not just AI/SaaS, but also health, fitness, marketing, education,
+# personal finance, creator economy, b2b services.
 SUBREDDITS_PRIMARY = [
-    # Direct idea sources (highest signal)
+    # Direct startup-builder communities (highest idea signal)
     "SaaS",
     "indiehackers",
     "startups",
     "microsaas",
-    # AI / ML — Maksim's competitive edge
+    "Entrepreneur",
+    "smallbusiness",
+    "EntrepreneurRideAlong",
+    # AI / ML (Maksim's optional edge, not the only thing)
     "MachineLearning",
     "LocalLLaMA",
     "artificial",
+    # Marketing / adtech / creator
+    "marketing",
+    "socialmedia",
+    "copywriting",
+    "Affiliatemarketing",
+    "PPC",
+    # Health & fitness — broad-population pain points
+    "Fitness",
+    "loseit",
+    "nutrition",
+    "running",
+    "GetMotivated",
+    # Education / edtech
+    "Teachers",
+    "edtech",
+    "languagelearning",
+    # Productivity / dev-tools
+    "productivity",
+    "webdev",
+    "programming",
+    # Personal finance — fintech consumer pain points
+    "personalfinance",
+    "Frugal",
+    # Insurance / risk
+    "Insurance",
+    # Industrial verticals — Maksim wants ideas from energy / transport /
+    # agritech / logistics / aerospace / defense / gaming as well.
+    "energy",
+    "RenewableEnergy",
+    "electricvehicles",
+    "logistics",
+    "supplychain",
+    "farming",
+    "Agriculture",
+    "gamedev",
+    "IndieDev",
+    "aviation",
+    "space",
+    "DefenseInnovation",
+    "LessCredibleDefence",
+    "geopolitics",
+    # Sport content + analytics + betting
+    "sports",
+    "nba",
+    "soccer",
+    "nfl",
+    "Fantasy_Football",
+    "sportsbook",
+    "sportsbetting",
+    # iGaming / casino / 18+ (signal for gambling-tech ideas)
+    "gambling",
+    "poker",
+    "OnlineGambling",
 ]
 
 SUBREDDITS_SECONDARY = [
     # Investment side — secondary per user spec
     "investing",
     "stocks",
+    "wallstreetbets",
+    "CryptoCurrency",
 ]
 
 # GitHub trending — focus on languages relevant to AI/SaaS dev

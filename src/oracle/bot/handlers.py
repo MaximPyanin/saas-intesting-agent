@@ -125,7 +125,7 @@ signals.
 • /settings — focus weights
 • /pause &lt;days&gt; — pause digests
 
-<i>Tap 🔥 / ❌ / 📌 buttons on each idea — every 30 feedbacks I'll
+<i>Tap 🔥 / ❌ / 📌 buttons on each idea — every 20 feedbacks I'll
 auto-recalibrate to learn what you actually want.</i>
 """
 
@@ -177,6 +177,7 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     final_digest = result.get("final_digest") or {}
     ideas_raw = final_digest.get("ideas") or []
+    ideas_extra_raw = final_digest.get("ideas_extra") or []
     investments_raw = final_digest.get("investments") or []
     errors = result.get("errors") or []
 
@@ -187,6 +188,12 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             ideas.append(BusinessIdea.model_validate(d))
         except Exception as e:  # noqa: BLE001
             log.warning("cmd_digest: failed to parse idea %r: %s", d.get("title"), e)
+
+    # Stash extras for /more (raw dicts — parsed lazily there)
+    ctx.application.bot_data["ideas_pool"] = ideas_extra_raw
+    ctx.application.bot_data["ideas_picked_industries"] = list({
+        (i.industry or "other").lower() for i in ideas
+    })
 
     signals: list[InvestmentSignal] = []
     for d in investments_raw:
@@ -270,9 +277,362 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ============================================================================
 
 
-async def cmd_morning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_clearfeedback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Wipe feedback + learning calibration to start with a clean slate.
+
+    Usage:
+      /clearfeedback           — show what would be deleted (dry run)
+      /clearfeedback confirm   — actually delete
+
+    Removes:
+      - all rows from `feedback` table
+      - cached `prompt_injection_ideas`, `weekly_summary`, `manual_preferences`
+        from `learning_weights` (resets the auto-learned profile)
+      - calibration counter
+
+    Does NOT touch: portfolio_holdings, signals, user_sources, watchlist.
+    """
+    args = " ".join(ctx.args or []).strip().lower()
+    confirm = args == "confirm"
+
+    async with get_db() as conn:
+        async with conn.execute("SELECT COUNT(*) FROM feedback") as cur:
+            fb_count = (await cur.fetchone())[0]
+        async with conn.execute(
+            "SELECT COUNT(*) FROM learning_weights WHERE key IN "
+            "('prompt_injection_ideas','weekly_summary','manual_preferences',"
+            "'last_calibration_at','calibrations_run','feedbacks_at_last_calibration')"
+        ) as cur:
+            lw_count = (await cur.fetchone())[0]
+
+    if not confirm:
+        await update.message.reply_text(
+            f"🗑️ <b>/clearfeedback</b> — dry run\n\n"
+            f"Будет удалено:\n"
+            f"• <b>{fb_count}</b> строк из <code>feedback</code>\n"
+            f"• <b>{lw_count}</b> learning ключей (auto-prefs, manual prefs, weekly summary)\n\n"
+            f"Не тронем: portfolio, signals, user_sources, watchlist.\n\n"
+            f"Подтвердить: <code>/clearfeedback confirm</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    async with get_db() as conn:
+        await conn.execute("DELETE FROM feedback")
+        await conn.execute(
+            "DELETE FROM learning_weights WHERE key IN "
+            "('prompt_injection_ideas','weekly_summary','manual_preferences',"
+            "'last_calibration_at','calibrations_run','feedbacks_at_last_calibration')"
+        )
+        await conn.commit()
+    log.info("clearfeedback: wiped %d feedback rows + %d learning keys", fb_count, lw_count)
     await update.message.reply_text(
-        render_morning_brief(mock_morning_data()),
+        f"✅ Удалено: <b>{fb_count}</b> фидбэков + <b>{lw_count}</b> learning ключей.\n\n"
+        f"<i>Бот начнёт собирать предпочтения с нуля.</i>",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_preferences(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manual preference override for idea_generator.
+
+    Usage:
+      /preferences                  — show current manual prefs + auto-learned
+      /preferences <text>           — set/replace manual preference text
+      /preferences clear            — wipe manual preferences (back to auto only)
+
+    The text is injected into idea_generator's system prompt with HIGHEST
+    authority (above auto-learned preferences). Examples:
+      /preferences хочу больше health и fitness, меньше b2b SaaS
+      /preferences избегай ai_tools на ближайший месяц
+      /preferences ищу только идеи где revenue $50-200/mo, MVP <= 4 weeks
+    """
+    from ..learning import (  # noqa: PLC0415
+        get_manual_preferences,
+        get_prompt_injection_ideas,
+        set_manual_preferences,
+    )
+
+    args_text = " ".join(ctx.args or []).strip()
+
+    if not args_text:
+        # Show current state
+        manual = await get_manual_preferences()
+        learned = await get_prompt_injection_ideas()
+        parts: list[str] = ["⚙️ <b>Preferences</b>\n"]
+        parts.append("<b>Manual</b> (твои явные правила):")
+        parts.append(f"<i>{html_escape(manual)}</i>" if manual else "<i>(не задано)</i>")
+        parts.append("")
+        parts.append("<b>Auto-learned</b> (из лайков/дизлайков, после ≥20 фидбэков):")
+        parts.append(f"<i>{html_escape(learned)}</i>" if learned else "<i>(пока недостаточно фидбэков)</i>")
+        parts.append("")
+        parts.append("<b>Установить:</b> <code>/preferences хочу больше health, меньше b2b</code>")
+        parts.append("<b>Очистить:</b> <code>/preferences clear</code>")
+        await update.message.reply_text("\n".join(parts), parse_mode="HTML")
+        return
+
+    if args_text.lower() == "clear":
+        await set_manual_preferences("")
+        await update.message.reply_text(
+            "🗑️ <i>Manual preferences cleared.</i> Используются только auto-learned.",
+            parse_mode="HTML",
+        )
+        return
+
+    if len(args_text) > 1000:
+        await update.message.reply_text(
+            "⚠️ Слишком длинное правило (>1000 символов). Сократи.",
+            parse_mode="HTML",
+        )
+        return
+
+    await set_manual_preferences(args_text)
+    await update.message.reply_text(
+        f"✅ <b>Manual preferences saved.</b>\n\n"
+        f"<i>{html_escape(args_text)}</i>\n\n"
+        f"Применится со следующего /digest. Очистить: <code>/preferences clear</code>",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_lastdigest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-show ideas from the current bot session's last digest.
+
+    Useful when Maksim clicked 'Like' on a card and wants to scroll back to it
+    (the toast ack doesn't remove the card anymore, but if bot restarted or
+    chat scrolled away, this re-renders them).
+
+    Reads `idea_store` and `signal_store` from bot_data — survives until bot
+    restart. No new LLM calls.
+    """
+    store = _idea_store(ctx)
+    if not store:
+        await update.message.reply_text(
+            "📭 <i>Не нашёл идей в кэше — возможно, бот перезапускался "
+            "или digest ещё не запускался. Запусти /digest.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    from .views import idea_buttons, render_idea_card  # noqa: PLC0415
+
+    await update.message.reply_text(
+        f"🔄 <b>Re-render: {len(store)} идей из последнего digest'а</b>",
+        parse_mode="HTML",
+    )
+    for idea_id, idea in store.items():
+        try:
+            await update.message.reply_text(
+                render_idea_card(idea, 0),
+                reply_markup=idea_buttons(idea_id),
+                parse_mode="HTML",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("cmd_lastdigest: render %s failed: %s", idea_id, e)
+
+
+async def cmd_more(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Surface 3 MORE business ideas from this run's pool, prioritizing
+    industries NOT yet shown. Reads `ideas_pool` + `ideas_picked_industries`
+    populated by the previous /digest call.
+
+    No new LLM calls — uses already-validated ideas that didn't make the
+    top-3 cut due to diversity quota. Cheap (~0 cost).
+    """
+    pool_raw: list[dict] = ctx.application.bot_data.get("ideas_pool") or []
+    seen_industries: set[str] = {
+        i.lower() for i in ctx.application.bot_data.get("ideas_picked_industries") or []
+    }
+    if not pool_raw:
+        await update.message.reply_text(
+            "📭 <i>Нет дополнительных идей в пуле этого digest'а.\n"
+            "Запусти новый /digest когда захочешь свежих.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Re-apply diversity selector against the pool, biased to new buckets.
+    # Trick: feed the selector a copy of the pool but pre-seed seen_industries
+    # by removing same-bucket candidates from contention.
+    from ..agents.idea_generator import _normalize_industry, TECH_BUCKET  # noqa: PLC0415
+
+    def _bucket(industry: str) -> str:
+        return "TECH" if industry in TECH_BUCKET else industry
+
+    seen_buckets = {_bucket(i) for i in seen_industries}
+
+    # Normalize industry on every idea in pool
+    for d in pool_raw:
+        d["industry"] = _normalize_industry(d.get("industry"))
+
+    # Sort by score same as diversity selector does
+    def _score(d: dict) -> tuple[int, int, int, int]:
+        verdict = (d.get("verdict") or "").upper()
+        strong = 1 if verdict == "STRONG_PASS" else 0
+        conf = int(d.get("confidence") or 0)
+        rounds = int(d.get("reflexion_rounds_passed") or 0)
+        tier = 1 if conf >= 60 else 0
+        return (tier, strong, conf, rounds)
+
+    pool_sorted = sorted(pool_raw, key=_score, reverse=True)
+
+    picked_raw: list[dict] = []
+    used_buckets: set[str] = set()
+    # Pass 1: only NEW buckets (not in seen_buckets)
+    for d in pool_sorted:
+        b = _bucket(d.get("industry") or "other")
+        if b in seen_buckets or b in used_buckets:
+            continue
+        picked_raw.append(d)
+        used_buckets.add(b)
+        if len(picked_raw) >= 3:
+            break
+    # Pass 2: if short, allow any bucket (still skipping previously-used in /digest)
+    if len(picked_raw) < 3:
+        picked_ids = {id(d) for d in picked_raw}
+        for d in pool_sorted:
+            if id(d) in picked_ids:
+                continue
+            b = _bucket(d.get("industry") or "other")
+            if b in used_buckets:
+                continue
+            picked_raw.append(d)
+            used_buckets.add(b)
+            if len(picked_raw) >= 3:
+                break
+
+    if not picked_raw:
+        await update.message.reply_text(
+            "📭 <i>В пуле остались только идеи из тех же отраслей что уже показывал.\n"
+            "Запусти свежий /digest для новых тем.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Render each via the standard idea card + register feedback buttons
+    digest_id = ctx.application.bot_data.get("current_digest_id", "more")
+    ideas: list[BusinessIdea] = []
+    for d in picked_raw:
+        try:
+            ideas.append(BusinessIdea.model_validate(d))
+        except Exception as e:  # noqa: BLE001
+            log.warning("cmd_more: failed to parse idea: %s", e)
+
+    if not ideas:
+        await update.message.reply_text("⚠️ Не удалось распарсить идеи из пула.")
+        return
+
+    # Update tracker so a SECOND /more skips these buckets too
+    new_industries = list({(i.industry or "other").lower() for i in ideas})
+    ctx.application.bot_data["ideas_picked_industries"] = list(
+        set(ctx.application.bot_data.get("ideas_picked_industries") or []) | set(new_industries)
+    )
+    # Remove picked from pool so subsequent /more doesn't repeat
+    picked_titles = {i.title for i in ideas}
+    ctx.application.bot_data["ideas_pool"] = [
+        d for d in pool_raw if d.get("title") not in picked_titles
+    ]
+
+    from .views import idea_buttons, render_idea_card  # noqa: PLC0415
+
+    await update.message.reply_text(
+        f"🔄 <b>Ещё {len(ideas)} идей</b> из этого digest'а — другие отрасли.",
+        parse_mode="HTML",
+    )
+    for i, idea in enumerate(ideas, start=1):
+        idea_id = f"m{i}_{digest_id}"
+        _idea_store(ctx)[idea_id] = idea
+        try:
+            await update.message.reply_text(
+                render_idea_card(idea, i),
+                reply_markup=idea_buttons(idea_id),
+                parse_mode="HTML",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("cmd_more: render idea %d failed: %s", i, e)
+
+
+async def cmd_morning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger the 07:00 Warsaw morning brief.
+
+    Mirrors `scheduler.morning_brief_job` but writes to the user who typed
+    /morning (so testing doesn't require the scheduled chat_id). Two
+    messages: 🚨 СРОЧНО + 💼 совет по портфелю.
+    """
+    from ..agents.portfolio_advisor import generate_morning_portfolio_advice  # noqa: PLC0415
+    from ..alerts import (  # noqa: PLC0415
+        get_active_alerts_no_dedup,
+        get_recently_fired_alerts,
+    )
+    from ..portfolio import get_portfolio_with_pnl  # noqa: PLC0415
+    from .views import (  # noqa: PLC0415
+        render_portfolio_morning_advice,
+        render_urgent_section,
+    )
+
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    try:
+        market_data, _ = await collect_market_data()
+    except Exception as e:  # noqa: BLE001
+        log.error("/morning: market fetch failed: %s", e)
+        market_data = {}
+
+    try:
+        active = await get_active_alerts_no_dedup(market_data)
+        recent = await get_recently_fired_alerts(hours=12)
+    except Exception as e:  # noqa: BLE001
+        log.error("/morning: alerts read failed: %s", e)
+        active, recent = [], []
+
+    # Top breaking news from last 12h
+    breaking_news: list[dict] = []
+    try:
+        async with get_db() as conn:
+            async with conn.execute(
+                """SELECT title, source_id, url FROM signals
+                   WHERE is_breaking = 1
+                     AND datetime(published_at) >= datetime('now', '-12 hours')
+                   ORDER BY published_at DESC LIMIT 4"""
+            ) as cur:
+                breaking_news = [dict(r) for r in await cur.fetchall()]
+    except Exception as e:  # noqa: BLE001
+        log.error("/morning: breaking news fetch failed: %s", e)
+
+    try:
+        portfolio = await get_portfolio_with_pnl(market_data)
+    except Exception as e:  # noqa: BLE001
+        log.error("/morning: portfolio fetch failed: %s", e)
+        portfolio = {"holdings": [], "totals": {}}
+
+    portfolio_movers = sorted(
+        [
+            h for h in (portfolio.get("holdings") or [])
+            if h.get("change_24h_pct") is not None
+            and abs(h.get("change_24h_pct") or 0) >= 2.0
+        ],
+        key=lambda h: abs(h.get("change_24h_pct") or 0),
+        reverse=True,
+    )
+
+    await update.message.reply_text(
+        render_urgent_section(
+            active, recent,
+            date=today_iso,
+            breaking_news=breaking_news,
+            portfolio_movers=portfolio_movers,
+        ),
+        parse_mode="HTML",
+    )
+
+    try:
+        advice = await generate_morning_portfolio_advice(portfolio)
+    except Exception as e:  # noqa: BLE001
+        log.error("/morning: portfolio advice failed: %s", e)
+        advice = []
+
+    await update.message.reply_text(
+        render_portfolio_morning_advice(advice, portfolio, date=today_iso),
         parse_mode="HTML",
     )
 
@@ -310,6 +670,26 @@ async def cmd_sources(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # python-telegram-bot scopes user_data per Telegram user automatically.
 
 ASK_TYPE, ASK_CATEGORY, ASK_URL, ASK_NAME, ASK_CONFIRM = range(5)
+
+# Add-to-portfolio ConversationHandler states (Step 20.5 — Maksim's request)
+# Entered via "➕ В мой портфель" inline button under each investment card.
+#
+#   click button         →  ASK_HOLDING_QTY  (text input, supports "usd 1500")
+#   user sends quantity  →  ASK_HOLDING_PRICE (text input, or "-" for current)
+#   user sends price     →  END (insert into portfolio_holdings)
+#   /cancel              →  END (clears draft)
+ASK_HOLDING_QTY, ASK_HOLDING_PRICE = range(100, 102)
+
+# Portfolio adjust (+$/-$) ConversationHandler
+#   Click 💰 +$ or 💸 -$ → ASK_ADJUST_AMOUNT (text input)
+#   User sends number → adjust_usd_invested → END
+ASK_ADJUST_AMOUNT = 200
+
+# Portfolio "add new position from scratch" ConversationHandler
+#   Click ➕ Добавить новую позицию → PICK_NEW_TICKER (inline keyboard with whitelist)
+#   Pick ticker → ASK_NEW_AMOUNT (text input)
+#   User sends $ amount → add_usd_holding → END
+PICK_NEW_TICKER, ASK_NEW_AMOUNT = range(300, 302)
 
 
 # Type-specific instructions for the URL input step
@@ -574,6 +954,522 @@ async def add_source_cancel_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 def html_escape(s: str) -> str:
     import html
     return html.escape(s or "")
+
+
+# ============================================================================
+# Add-to-portfolio ConversationHandler (Step 20.5)
+# ============================================================================
+#
+# Triggered by the "➕ В мой портфель" inline button under each investment
+# card (callback_data="inv_add_<sig_id>"). Asks the user for quantity and
+# average buy price, then INSERTs into portfolio_holdings.
+#
+# Supports two input formats for quantity:
+#   - Plain number (e.g. "10" → 10 shares/units, normal mode)
+#   - "usd <amount>" (e.g. "usd 1500" → $1500 invested, USD-only mode for ETFs
+#     where the user knows only the $ amount, not share count). In this mode
+#     the second question (price) is optional — entering "-" or "" means
+#     "use current market price as price_at_add for future P&L drift".
+#
+# State storage: ctx.user_data["pending_holding"] = {asset_label, sig_id, ...}
+
+
+def _holding_draft(ctx: ContextTypes.DEFAULT_TYPE) -> dict:
+    return ctx.user_data.setdefault("pending_holding", {})
+
+
+def _clear_holding_draft(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx.user_data.pop("pending_holding", None)
+
+
+async def add_holding_callback_entry(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Entry point — callback ^inv_add_<sig_id>$ pressed by Maksim.
+
+    Looks up the InvestmentSignal in bot_data to get the asset_label and the
+    current market price (used as default if user skips the price prompt),
+    then asks for quantity.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    sig_id = (query.data or "")[len("inv_add_"):]
+    store = _signal_store(ctx)
+    sig: InvestmentSignal | None = store.get(sig_id)
+    if sig is None:
+        await query.message.reply_text(
+            "⚠️ Сигнал не найден в текущем дайджесте (возможно, бот перезапускался). "
+            "Добавь позицию руками: <code>/add_holding TICKER QTY PRICE</code>",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    from ..portfolio import display_name, is_trackable_for_portfolio  # noqa: PLC0415
+
+    # Whitelist check: only the 11 tickers we actually track are addable
+    if not is_trackable_for_portfolio(sig.asset):
+        await query.message.reply_text(
+            f"⚠️ <b>{display_name(sig.asset)}</b> не в списке отслеживаемых для портфеля.\n\n"
+            f"Бот трекает реальные позиции — добавлять можно только: "
+            f"<code>CSPX, SMH, NATO, NUCL, EXH1, IB1T, ETH-CORE, IB01, CASH-USD, GOLD-PHYS, NVDA</code>.\n\n"
+            f"Если хочешь экспозицию на {display_name(sig.asset)} — найди соответствующий "
+            f"UCITS-ETF в твоём списке и добавь его.",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    draft = _holding_draft(ctx)
+    draft.clear()
+    draft["sig_id"] = sig_id
+    draft["asset_label"] = sig.asset
+    draft["current_price"] = float(sig.price) if sig.price else 0.0
+    draft["signal_type"] = sig.signal_type
+
+    await query.message.reply_text(
+        f"➕ <b>Добавляем {display_name(sig.asset)} в портфель</b>\n\n"
+        f"Цена сейчас: <code>${sig.price:,.2f}</code>\n\n"
+        f"Сколько штук купил?\n"
+        f"• Число → <code>10</code> (10 штук)\n"
+        f"• Или сумма в USD → <code>usd 1500</code> (для ETF без точного количества)\n\n"
+        f"<i>Отмена: /cancel</i>",
+        parse_mode="HTML",
+    )
+    return ASK_HOLDING_QTY
+
+
+async def add_holding_qty(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """ASK_HOLDING_QTY → ASK_HOLDING_PRICE — parse quantity or USD amount."""
+    draft = _holding_draft(ctx)
+    text = (update.message.text or "").strip().lower().replace(",", ".")
+
+    if text.startswith("usd "):
+        # USD-only mode
+        try:
+            usd_amount = float(text[4:].strip())
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Не могу прочитать сумму. Пример: <code>usd 1500</code>",
+                parse_mode="HTML",
+            )
+            return ASK_HOLDING_QTY
+        if usd_amount <= 0:
+            await update.message.reply_text("⚠️ Сумма должна быть > 0.")
+            return ASK_HOLDING_QTY
+        draft["mode"] = "usd"
+        draft["usd_invested"] = usd_amount
+        current = draft.get("current_price") or 0.0
+        await update.message.reply_text(
+            f"💰 Сумма: <code>${usd_amount:,.2f}</code>\n\n"
+            f"По какой средней цене входил?\n"
+            f"• Число → <code>{current:.2f}</code> например\n"
+            f"• Или <code>-</code> чтобы взять текущую (${current:,.2f}) — "
+            f"P&L начнётся с 0%\n\n"
+            f"<i>Отмена: /cancel</i>",
+            parse_mode="HTML",
+        )
+        return ASK_HOLDING_PRICE
+
+    # Plain quantity mode
+    try:
+        qty = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Не могу прочитать число. Пример: <code>10</code> или <code>usd 1500</code>",
+            parse_mode="HTML",
+        )
+        return ASK_HOLDING_QTY
+    if qty <= 0:
+        await update.message.reply_text("⚠️ Количество должно быть > 0.")
+        return ASK_HOLDING_QTY
+    draft["mode"] = "qty"
+    draft["quantity"] = qty
+    current = draft.get("current_price") or 0.0
+    await update.message.reply_text(
+        f"📦 Количество: <code>{qty:g}</code>\n\n"
+        f"По какой средней цене входил? (USD)\n"
+        f"• Число → <code>{current:.2f}</code>\n"
+        f"• Или <code>-</code> чтобы взять текущую (${current:,.2f})\n\n"
+        f"<i>Отмена: /cancel</i>",
+        parse_mode="HTML",
+    )
+    return ASK_HOLDING_PRICE
+
+
+async def add_holding_price(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """ASK_HOLDING_PRICE → END — parse price, insert into DB, confirm."""
+    draft = _holding_draft(ctx)
+    text = (update.message.text or "").strip().replace(",", ".")
+    current_price = draft.get("current_price") or 0.0
+
+    if text in ("-", ""):
+        price = current_price
+    else:
+        try:
+            price = float(text)
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Не могу прочитать цену. Пример: <code>185.50</code> или <code>-</code>",
+                parse_mode="HTML",
+            )
+            return ASK_HOLDING_PRICE
+        if price < 0:
+            await update.message.reply_text("⚠️ Цена должна быть ≥ 0.")
+            return ASK_HOLDING_PRICE
+
+    asset_label = draft.get("asset_label", "?")
+    mode = draft.get("mode", "qty")
+    from ..portfolio import display_name  # noqa: PLC0415
+    dname = display_name(asset_label)
+
+    try:
+        if mode == "usd":
+            from ..portfolio import add_usd_holding  # noqa: PLC0415
+            usd_inv = float(draft.get("usd_invested") or 0.0)
+            await add_usd_holding(
+                asset_label=asset_label,
+                usd_invested=usd_inv,
+                price_at_add=price if price > 0 else None,
+                notes=f"added via inline button on signal {draft.get('sig_id', '?')}",
+            )
+            await update.message.reply_text(
+                f"✅ Добавлено: <b>{dname}</b> — "
+                f"${usd_inv:,.2f} @ ${price:,.2f}\n\n"
+                f"<i>Посмотри полный портфель: /portfolio</i>",
+                parse_mode="HTML",
+            )
+        else:
+            qty = float(draft.get("quantity") or 0.0)
+            await add_or_update_holding(
+                asset_label=asset_label,
+                quantity=qty,
+                buy_price_usd=price,
+                notes=f"added via inline button on signal {draft.get('sig_id', '?')}",
+                price_at_add=price if price > 0 else None,
+            )
+            await update.message.reply_text(
+                f"✅ Добавлено: <b>{dname}</b> — "
+                f"{qty:g} шт @ ${price:,.2f}\n\n"
+                f"<i>Посмотри полный портфель: /portfolio</i>",
+                parse_mode="HTML",
+            )
+    except ValueError as e:
+        await update.message.reply_text(
+            f"⚠️ Не получилось: <code>{html_escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("add_holding via callback failed")
+        await update.message.reply_text(
+            f"⚠️ Ошибка: <code>{html_escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+
+    _clear_holding_draft(ctx)
+    return ConversationHandler.END
+
+
+async def add_holding_cancel_cmd(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """/cancel inside the add-holding flow."""
+    _clear_holding_draft(ctx)
+    await update.message.reply_text(
+        "❌ Отменено. Позиция не добавлена."
+    )
+    return ConversationHandler.END
+
+
+# ============================================================================
+# Portfolio adjust (+$/-$) ConversationHandler
+# ============================================================================
+
+
+async def pf_adjust_callback_entry(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Entry: pf_addusd_<LABEL> or pf_subusd_<LABEL>."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    if data.startswith("pf_addusd_"):
+        mode = "add"
+        label = data[len("pf_addusd_"):]
+    elif data.startswith("pf_subusd_"):
+        mode = "sub"
+        label = data[len("pf_subusd_"):]
+    else:
+        return ConversationHandler.END
+
+    ctx.user_data["pf_adjust"] = {"label": label, "mode": mode}
+    from ..portfolio import display_name  # noqa: PLC0415
+
+    verb = "Добавить" if mode == "add" else "Снять"
+    sign = "+" if mode == "add" else "-"
+    await query.message.reply_text(
+        f"{sign}💰 <b>{verb} деньги: {display_name(label)}</b>\n\n"
+        f"Сколько USD?\n"
+        f"• Число → <code>500</code> ({verb.lower()} $500)\n\n"
+        f"<i>Отмена: /cancel</i>",
+        parse_mode="HTML",
+    )
+    return ASK_ADJUST_AMOUNT
+
+
+async def pf_adjust_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse amount, call adjust_usd_invested, confirm."""
+    draft = ctx.user_data.get("pf_adjust") or {}
+    label = draft.get("label", "")
+    mode = draft.get("mode", "add")
+
+    text = (update.message.text or "").strip().replace(",", ".").replace("$", "")
+    try:
+        amount = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Не могу прочитать число. Пример: <code>500</code>",
+            parse_mode="HTML",
+        )
+        return ASK_ADJUST_AMOUNT
+    if amount <= 0:
+        await update.message.reply_text("⚠️ Сумма должна быть > 0.")
+        return ASK_ADJUST_AMOUNT
+
+    delta = amount if mode == "add" else -amount
+    from ..portfolio import (  # noqa: PLC0415
+        adjust_usd_invested,
+        display_name,
+        remove_holding,
+    )
+
+    try:
+        updated = await adjust_usd_invested(label, delta)
+    except Exception as e:  # noqa: BLE001
+        log.exception("pf_adjust failed")
+        await update.message.reply_text(
+            f"⚠️ Ошибка: <code>{html_escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        ctx.user_data.pop("pf_adjust", None)
+        return ConversationHandler.END
+
+    if updated is None and mode == "sub":
+        # Final would be negative → offer to remove
+        await update.message.reply_text(
+            f"⚠️ Снятие ${amount:,.0f} опустит позицию ниже нуля.\n"
+            f"Нажми 🗑️ <b>Удалить</b> в /portfolio чтобы убрать её полностью, "
+            f"или попробуй снять меньшую сумму.",
+            parse_mode="HTML",
+        )
+        ctx.user_data.pop("pf_adjust", None)
+        return ConversationHandler.END
+
+    if updated is None:
+        await update.message.reply_text("⚠️ Позиция не найдена.")
+        ctx.user_data.pop("pf_adjust", None)
+        return ConversationHandler.END
+
+    new_usd = float(updated.get("usd_invested") or 0)
+    verb = "добавлено" if mode == "add" else "снято"
+    await update.message.reply_text(
+        f"✅ <b>{display_name(label)}</b>: {verb} ${amount:,.0f}\n"
+        f"💰 Текущая позиция: ${new_usd:,.0f}\n\n"
+        f"<i>Применится в следующем /morning и /digest.</i>",
+        parse_mode="HTML",
+    )
+    ctx.user_data.pop("pf_adjust", None)
+    return ConversationHandler.END
+
+
+async def pf_adjust_cancel_cmd(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """/cancel inside the +/- adjust flow."""
+    ctx.user_data.pop("pf_adjust", None)
+    await update.message.reply_text("❌ Отменено.")
+    return ConversationHandler.END
+
+
+async def pf_addnew_entry(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Entry: '➕ Добавить новую позицию' inline button.
+
+    Shows a keyboard with all whitelist tickers NOT yet in portfolio.
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # noqa: PLC0415
+
+    from ..portfolio import (  # noqa: PLC0415
+        TRACKABLE_PORTFOLIO_TICKERS,
+        display_name,
+        list_holdings,
+    )
+
+    query = update.callback_query
+    await query.answer()
+
+    existing = {h["asset_label"].upper() for h in await list_holdings()}
+    addable = [t for t in TRACKABLE_PORTFOLIO_TICKERS if t.upper() not in existing]
+
+    if not addable:
+        await query.message.reply_text(
+            "📭 <i>Все 11 трекаемых тикеров уже в портфеле. "
+            "Удалить ненужный через 🗑️ или используй 💸 -$ чтобы обнулить.</i>",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    # Build keyboard 2 per row for readability
+    buttons = [
+        InlineKeyboardButton(display_name(t), callback_data=f"pf_pick_{t}")
+        for t in addable
+    ]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="pf_pick_cancel")])
+
+    await query.message.reply_text(
+        "➕ <b>Выбери тикер для новой позиции:</b>\n\n"
+        "<i>Только из whitelist — это активы, которые мы реально трекаем "
+        "(цены, новости, P&amp;L).</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    return PICK_NEW_TICKER
+
+
+async def pf_addnew_pick(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """User picked a ticker → ask for $ amount."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    if data == "pf_pick_cancel":
+        ctx.user_data.pop("pf_new", None)
+        await query.edit_message_text("❌ Отменено.")
+        return ConversationHandler.END
+
+    label = data[len("pf_pick_"):]
+    from ..portfolio import display_name, is_trackable_for_portfolio  # noqa: PLC0415
+
+    if not is_trackable_for_portfolio(label):
+        await query.edit_message_text(
+            f"⚠️ <code>{label}</code> не в whitelist'е. Отменено.",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    ctx.user_data["pf_new"] = {"label": label}
+    await query.message.reply_text(
+        f"➕ <b>Новая позиция: {display_name(label)}</b>\n\n"
+        f"Сколько USD ты вложил?\n"
+        f"• Число → <code>500</code> ($500)\n"
+        f"• Или <code>0</code> если хочешь только трекать без денег "
+        f"(например физ. золото)\n\n"
+        f"<i>Отмена: /cancel</i>",
+        parse_mode="HTML",
+    )
+    return ASK_NEW_AMOUNT
+
+
+async def pf_addnew_amount(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Parse amount, INSERT, confirm."""
+    draft = ctx.user_data.get("pf_new") or {}
+    label = draft.get("label", "")
+    if not label:
+        await update.message.reply_text("⚠️ Сессия потеряна. Запусти /portfolio заново.")
+        return ConversationHandler.END
+
+    text = (update.message.text or "").strip().replace(",", ".").replace("$", "")
+    try:
+        usd = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Не могу прочитать число. Пример: <code>500</code>",
+            parse_mode="HTML",
+        )
+        return ASK_NEW_AMOUNT
+    if usd < 0:
+        await update.message.reply_text("⚠️ Сумма должна быть ≥ 0.")
+        return ASK_NEW_AMOUNT
+
+    from ..agents.market import collect_market_data  # noqa: PLC0415
+    from ..portfolio import (  # noqa: PLC0415
+        _lookup_current_price,
+        add_usd_holding,
+        display_name,
+    )
+
+    # Capture entry-price snapshot so P&L drift works
+    price_at_add = None
+    try:
+        market_data, _ = await collect_market_data()
+        price_at_add = _lookup_current_price(label, market_data)
+    except Exception as e:  # noqa: BLE001
+        log.debug("pf_addnew: market fetch failed: %s", e)
+
+    try:
+        await add_usd_holding(
+            asset_label=label,
+            usd_invested=usd,
+            price_at_add=price_at_add,
+            notes=f"added via /portfolio ➕ button",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("pf_addnew: insert failed")
+        await update.message.reply_text(
+            f"⚠️ Ошибка: <code>{html_escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        ctx.user_data.pop("pf_new", None)
+        return ConversationHandler.END
+
+    ctx.user_data.pop("pf_new", None)
+    price_str = f" @ ${price_at_add:,.2f}" if price_at_add else ""
+    await update.message.reply_text(
+        f"✅ <b>{display_name(label)}</b> добавлена в портфель: "
+        f"${usd:,.0f}{price_str}\n\n"
+        f"<i>Появится в следующем /morning и /digest. "
+        f"Посмотри: /portfolio</i>",
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
+
+
+async def pf_addnew_cancel_cmd(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    ctx.user_data.pop("pf_new", None)
+    await update.message.reply_text("❌ Отменено.")
+    return ConversationHandler.END
+
+
+async def _handle_pf_remove(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    query: Any,
+    label: str,
+) -> None:
+    """🗑️ Удалить — drop position from portfolio_holdings."""
+    from ..portfolio import display_name, remove_holding  # noqa: PLC0415
+
+    removed = await remove_holding(label)
+    if removed:
+        await query.edit_message_text(
+            f"🗑️ <b>{display_name(label)}</b> удалена из портфеля.\n"
+            f"<i>В следующем /morning и /digest её больше не будет.</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await query.edit_message_text(
+            f"⚠️ Позиция <b>{label}</b> не найдена (возможно, уже удалена).",
+            parse_mode="HTML",
+        )
 
 
 # ============================================================================
@@ -1019,29 +1915,55 @@ def _render_portfolio_html(portfolio: dict) -> str:
             parts.append(f"• {cls}: {_fmt_money(mv, decimals=0)} ({pct:.0f}%) · {cnt} pos")
         parts.append("")
 
+    from ..portfolio import display_name  # noqa: PLC0415
+
     parts.append("<b>Positions:</b>")
     for h in holdings:
         label = h["asset_label"]
-        qty = h["quantity"]
-        avg = h["avg_buy_price"]
+        dname = display_name(label)
+        qty = h["quantity"] or 0
+        avg = h["avg_buy_price"] or 0
         cur = h.get("current_price")
         mv = h.get("market_value_usd")
         pnl_pct = h.get("pnl_pct")
         status = h.get("price_status", "?")
+        usd_inv = h.get("usd_invested") or 0
+        isin = h.get("isin")
         notes = h.get("notes") or ""
 
         if status == "cash":
-            line = f"• <b>{label}</b>: {_fmt_money(qty, decimals=2)}"
+            cash_amt = float(usd_inv) if usd_inv else float(qty)
+            line = f"• <b>{dname}</b>: {_fmt_money(cash_amt, decimals=2)}"
         elif status == "live":
             line = (
-                f"• <b>{label}</b>: {qty:g} @ {_fmt_money(avg)} avg → "
+                f"• <b>{dname}</b>: {qty:g} @ {_fmt_money(avg)} avg → "
                 f"now {_fmt_money(cur)} · MV {_fmt_money(mv, decimals=0)} · {_fmt_pct(pnl_pct)}"
             )
-        else:
+        elif status == "usd_drift":
+            entry = h.get("price_at_add") or 0
             line = (
-                f"• <b>{label}</b>: {qty:g} @ {_fmt_money(avg)} avg "
-                f"<i>(no live price)</i>"
+                f"• <b>{dname}</b>: {_fmt_money(usd_inv, decimals=0)} invested → "
+                f"now {_fmt_money(mv, decimals=0)} ({_fmt_pct(pnl_pct)} vs entry @ {_fmt_money(entry)})"
             )
+        elif status == "usd_basis":
+            line = (
+                f"• <b>{dname}</b>: {_fmt_money(usd_inv, decimals=0)} invested "
+                f"<i>(no entry-price snapshot — P&L unknown)</i>"
+            )
+        else:
+            # Fallback for stale qty-mode rows (no live price)
+            if usd_inv and not qty:
+                line = (
+                    f"• <b>{dname}</b>: {_fmt_money(usd_inv, decimals=0)} invested "
+                    f"<i>(no live price)</i>"
+                )
+            else:
+                line = (
+                    f"• <b>{dname}</b>: {qty:g} @ {_fmt_money(avg)} avg "
+                    f"<i>(no live price)</i>"
+                )
+        if isin:
+            line += f" <code>{html_escape(isin)}</code>"
         if notes:
             line += f" <i>({html_escape(notes)})</i>"
         parts.append(line)
@@ -1055,9 +1977,18 @@ def _render_portfolio_html(portfolio: dict) -> str:
 
 
 async def cmd_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current holdings with live P&L."""
+    """Show current holdings with live P&L + per-holding management buttons.
+
+    Always reads FRESH data from the DB. Morning brief and digest also
+    re-read from DB on every run, so manual edits via these buttons are
+    picked up immediately by the next /morning or /digest.
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # noqa: PLC0415
+
+    from ..portfolio import display_name  # noqa: PLC0415
+
     await update.message.reply_text(
-        "📡 Fetching live prices for your portfolio...",
+        "📡 Подгружаю свежие цены...",
         parse_mode="HTML",
     )
     try:
@@ -1073,10 +2004,75 @@ async def cmd_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # 1. Aggregate overview
     await update.message.reply_text(
         _render_portfolio_html(portfolio),
         parse_mode="HTML",
         disable_web_page_preview=True,
+    )
+
+    # 2. Per-holding management cards (compact)
+    holdings = portfolio.get("holdings") or []
+    if not holdings:
+        return
+
+    for h in holdings:
+        label = h["asset_label"]
+        dname = display_name(label)
+        usd_inv = h.get("usd_invested") or 0
+        mv = h.get("market_value_usd") or usd_inv
+        pnl_pct = h.get("pnl_pct")
+        c24 = h.get("change_24h_pct")
+
+        sign24 = "+" if (c24 or 0) >= 0 else ""
+        live_24h = f"{sign24}{c24:.1f}%" if c24 is not None else "—"
+        sign_pnl = "+" if (pnl_pct or 0) >= 0 else ""
+        pnl_str = f"{sign_pnl}{pnl_pct:.1f}% от входа" if pnl_pct is not None else ""
+
+        line = f"<b>{html_escape(dname)}</b>"
+        if usd_inv:
+            line += f"\n💰 ${usd_inv:,.0f} invested"
+        if mv and mv != usd_inv:
+            line += f" · сейчас ${mv:,.0f}"
+        line += f"\n📊 24h: {live_24h}"
+        if pnl_str:
+            line += f" · {pnl_str}"
+
+        # Inline buttons row
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💰 +$", callback_data=f"pf_addusd_{label}"),
+                InlineKeyboardButton("💸 -$", callback_data=f"pf_subusd_{label}"),
+            ],
+            [
+                InlineKeyboardButton("🗑️ Удалить", callback_data=f"pf_remove_{label}"),
+            ],
+        ])
+        try:
+            await update.message.reply_text(line, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cmd_portfolio: render %s failed: %s", label, e)
+
+    # Footer + always-show "Add new position" button
+    from ..portfolio import TRACKABLE_PORTFOLIO_TICKERS  # noqa: PLC0415
+    existing = {(h.get("asset_label") or "").upper() for h in holdings}
+    addable = [t for t in TRACKABLE_PORTFOLIO_TICKERS if t.upper() not in existing]
+
+    legend_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"➕ Добавить новую позицию ({len(addable)} доступно)",
+            callback_data="pf_addnew",
+        )],
+    ])
+
+    await update.message.reply_text(
+        "<i>💰 +$ — добавить денег к позиции\n"
+        "💸 -$ — снять деньги с позиции\n"
+        "🗑️ — удалить позицию полностью\n"
+        "➕ — добавить новый тикер из whitelist\n\n"
+        "Изменения сразу попадают в /morning и /digest.</i>",
+        parse_mode="HTML",
+        reply_markup=legend_kb,
     )
 
 
@@ -1126,11 +2122,23 @@ async def cmd_add_holding(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     notes = " ".join(args[3:]) if len(args) > 3 else None
 
+    from ..portfolio import is_trackable_for_portfolio  # noqa: PLC0415
+
     ok, asset_class_or_err = validate_asset_label(asset_label)
     if not ok:
         await update.message.reply_text(
             f"⚠️ Unknown asset <code>{html_escape(asset_label)}</code>.\n\n"
             f"{ADD_HOLDING_USAGE}",
+            parse_mode="HTML",
+        )
+        return
+
+    if not is_trackable_for_portfolio(asset_label):
+        await update.message.reply_text(
+            f"⚠️ <code>{asset_label}</code> не в whitelist'е портфеля.\n\n"
+            f"Бот трекает реальные позиции — добавлять можно только:\n"
+            f"<code>CSPX, SMH, NATO, NUCL, EXH1, IB1T, ETH-CORE, IB01, "
+            f"CASH-USD, GOLD-PHYS, NVDA</code>",
             parse_mode="HTML",
         )
         return
@@ -1232,6 +2240,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_reply_markup(reply_markup=dislike_reason_buttons(idea_id))
     elif data.startswith("save_"):
         await _handle_idea_feedback(ctx, query, data[len("save_"):], "save", reason=None)
+    elif data.startswith("build_"):
+        # High-intent signal — heaviest weight in learning loop
+        await _handle_idea_feedback(ctx, query, data[len("build_"):], "build", reason=None)
     elif data.startswith("deep_"):
         await _handle_idea_deep_dive(ctx, query, data[len("deep_"):])
     elif data.startswith("reason_"):
@@ -1249,9 +2260,27 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     elif data.startswith("inv_skip_"):
         await _handle_signal_feedback(ctx, query, data[len("inv_skip_"):], "dislike")
     elif data.startswith("inv_watch_"):
-        await _handle_signal_feedback(ctx, query, data[len("inv_watch_"):], "save")
+        sig_id = data[len("inv_watch_"):]
+        # Watch = feedback save + add to active watchlist (alerts fire on ±5%)
+        await _handle_signal_feedback(ctx, query, sig_id, "save")
+        try:
+            sig = _signal_store(ctx).get(sig_id)
+            if sig and sig.price and sig.price > 0:
+                from ..watchlist import add_to_watchlist  # noqa: PLC0415
+                await add_to_watchlist(
+                    asset_label=sig.asset,
+                    baseline_price=float(sig.price),
+                    source_sig_id=sig_id,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("inv_watch_: failed to add to watchlist: %s", e)
     elif data.startswith("inv_deep_"):
         await _handle_signal_deep_dive(ctx, query, data[len("inv_deep_"):])
+
+    # ----- Portfolio management buttons (per-holding) -----
+    elif data.startswith("pf_remove_"):
+        await _handle_pf_remove(ctx, query, data[len("pf_remove_"):])
+    # pf_addusd_ / pf_subusd_ are caught by their ConversationHandler entry
 
     # ----- Sources card buttons (Step 8 — real implementations) -----
     # Note: "add_source" is captured by ConversationHandler entry_point, NOT here
@@ -1294,11 +2323,28 @@ async def _handle_idea_feedback(
         item_snapshot=idea.model_dump(),
     )
     label = {
-        "like": "🔥 Loved",
-        "save": "📌 Saved",
+        "like":    "🔥 Loved",
+        "save":    "📌 Saved",
         "dislike": "❌ Rejected",
-    }[feedback_type]
-    suffix = f" <i>({reason})</i>" if reason else ""
+        "build":   "🚀 Going to build",
+    }.get(feedback_type, feedback_type)
+    suffix = f" ({reason})" if reason else ""
+
+    # For LIKE / SAVE / BUILD — only toast, do NOT replace card text.
+    # User wants to keep the card visible to scroll back / press Deep dive.
+    # For DISLIKE with reason — replace, since the reason-keyboard already
+    # replaced the original markup and user finished the flow.
+    if feedback_type in ("like", "save", "build"):
+        try:
+            await query.answer(
+                text=f"{label}: записано",
+                show_alert=False,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    # Dislike / dislike-with-reason → replace card to confirm completion
     await query.edit_message_text(
         f"{label}{suffix}: <b>{idea.title}</b>\n\n"
         f"<i>Feedback recorded — ORACLE learns from this.</i>",
@@ -1331,10 +2377,17 @@ async def _handle_signal_feedback(
         "save": "📌 Watching",
         "dislike": "❌ Skipped",
     }[feedback_type]
-    await query.edit_message_text(
-        f"{label}: <b>{sig.asset}</b>\n\n<i>Feedback recorded.</i>",
-        parse_mode="HTML",
-    )
+    from ..portfolio import display_name  # noqa: PLC0415
+
+    # Like / Save / dislike on investment signals — toast only, keep card visible.
+    # User wants to read the card again, click Deep dive, Add to portfolio etc.
+    try:
+        await query.answer(
+            text=f"{label}: {display_name(sig.asset)}",
+            show_alert=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _handle_idea_deep_dive(
@@ -1342,10 +2395,61 @@ async def _handle_idea_deep_dive(
     query: Any,
     idea_id: str,
 ) -> None:
+    """Real deep-dive on an idea — runs a focused LLM call (gpt-5.4-mini)
+    that produces pricing analysis, CAC estimate, top 3 actionable next
+    steps, and risk-callouts. Cheap (~$0.01) but high-value.
+
+    Fallback (no LLM creds) — static placeholder.
+    """
     idea = _idea_store(ctx).get(idea_id)
     if not idea:
         await query.edit_message_text("⚠️ Idea not found (bot may have restarted).")
         return
+
+    # Show working state — deep-dive takes 5-15 sec
+    try:
+        progress = await query.message.reply_text(
+            f"🔍 <i>Готовлю deep-dive по «{html_escape(idea.title)}»...\n"
+            f"Анализ цен / CAC / next steps. ~10 сек.</i>",
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001
+        progress = None
+
+    try:
+        from ..agents.deep_dive import run_idea_deep_dive  # noqa: PLC0415
+        dive = await run_idea_deep_dive(idea.model_dump())
+    except Exception as e:  # noqa: BLE001
+        log.warning("deep_dive: failed — falling back to static: %s", e)
+        dive = None
+
+    if dive:
+        text = (
+            f"🔍 <b>Deep dive: {html_escape(idea.title)}</b>\n\n"
+            f"💵 <b>Pricing анализ:</b>\n{html_escape(dive.get('pricing_analysis', '—'))}\n\n"
+            f"🎯 <b>CAC оценка:</b>\n{html_escape(dive.get('cac_estimate', '—'))}\n\n"
+            f"📊 <b>Конкуренты (углублённо):</b>\n"
+            f"{html_escape(dive.get('competitor_landscape', '—'))}\n\n"
+            f"🚀 <b>Top 3 next steps:</b>\n"
+        )
+        next_steps = dive.get("next_steps") or []
+        for i, step in enumerate(next_steps[:3], start=1):
+            text += f"{i}. {html_escape(step)}\n"
+        risks = dive.get("risk_callouts") or []
+        if risks:
+            text += f"\n⚠️ <b>Риски/блокеры:</b>\n"
+            for r in risks[:3]:
+                text += f"• {html_escape(r)}\n"
+        if progress:
+            try:
+                await progress.edit_text(text, parse_mode="HTML")
+                return
+            except Exception:
+                pass
+        await query.message.reply_text(text, parse_mode="HTML")
+        return
+
+    # Fallback static
     competitors = "\n".join(f"• {c}" for c in idea.competitors) if idea.competitors else "<i>(none found)</i>"
     text = (
         f"🔍 <b>Deep dive: {idea.title}</b>\n\n"
@@ -1365,22 +2469,91 @@ async def _handle_signal_deep_dive(
     query: Any,
     sig_id: str,
 ) -> None:
+    """Real investment deep-dive — LLM call producing technical levels +
+    upcoming catalysts + historical analogues + sizing + downside risk.
+
+    Anchored to Maksim's actual portfolio allocation (computed fresh
+    from DB). Cost ~$0.01 per click.
+    """
     sig = _signal_store(ctx).get(sig_id)
     if not sig:
         await query.edit_message_text("⚠️ Signal not found (bot may have restarted).")
         return
-    key_events = "\n".join(f"• {e}" for e in sig.key_events) if sig.key_events else "<i>(none)</i>"
+
+    from ..portfolio import display_name  # noqa: PLC0415
+
+    progress = None
+    try:
+        progress = await query.message.reply_text(
+            f"📊 <i>Готовлю deep-dive по {display_name(sig.asset)}...\n"
+            f"Technical levels + catalysts + sizing для твоего портфеля. ~10 сек.</i>",
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fetch fresh portfolio snapshot (always current — reads DB)
+    portfolio_summary = ""
+    try:
+        from ..agents.market import collect_market_data  # noqa: PLC0415
+        from ..portfolio import (  # noqa: PLC0415
+            format_portfolio_for_llm,
+            get_portfolio_with_pnl,
+        )
+        market_data, _ = await collect_market_data()
+        portfolio = await get_portfolio_with_pnl(market_data)
+        portfolio_summary = format_portfolio_for_llm(portfolio)
+    except Exception as e:  # noqa: BLE001
+        log.warning("invest_deep_dive: portfolio fetch failed: %s", e)
+        portfolio_summary = "(portfolio context unavailable)"
+
+    # Call the deep-dive agent
+    dive = None
+    try:
+        from ..agents.invest_deep_dive import run_invest_deep_dive  # noqa: PLC0415
+        dive = await run_invest_deep_dive(sig.model_dump(), portfolio_summary)
+    except Exception as e:  # noqa: BLE001
+        log.warning("invest_deep_dive: failed: %s", e)
+
+    if dive:
+        catalysts = "\n".join(f"• {c}" for c in (dive.get("upcoming_catalysts") or []))
+        text = (
+            f"📊 <b>Deep-dive · {display_name(sig.asset)}</b>\n"
+            f"💵 ${sig.price:,.2f} ({sig.change_24h:+.1f}% 24h)\n\n"
+            f"📐 <b>Технические уровни:</b>\n{html_escape(dive.get('technical_levels', '—'))}\n\n"
+            f"📅 <b>Ближайшие катализаторы:</b>\n{html_escape(catalysts) if catalysts else '<i>—</i>'}\n\n"
+            f"📚 <b>Историческая аналогия:</b>\n{html_escape(dive.get('historical_analogues', '—'))}\n\n"
+            f"⚖️ <b>Сайзинг под твой портфель:</b>\n{html_escape(dive.get('sizing_recommendation', '—'))}\n\n"
+            f"⚠️ <b>Downside-риск:</b> {html_escape(dive.get('downside_risk', '—'))}\n\n"
+            f"<i>Educational only. NOT financial advice.</i>"
+        )
+        try:
+            if progress:
+                await progress.edit_text(text, parse_mode="HTML")
+                return
+        except Exception:
+            pass
+        await query.message.reply_text(text, parse_mode="HTML")
+        return
+
+    # Fallback: re-show signal card content if LLM failed
+    news = "\n".join(f"• {n}" for n in (sig.news_highlights or [])[:5]) or "<i>(нет новостей)</i>"
     text = (
-        f"📊 <b>Full analysis: {sig.asset}</b>\n\n"
-        f"<b>Bull thesis ({sig.bull_prob}%):</b> {sig.bull_scenario}\n"
-        f"<i>Trigger:</i> {sig.bull_trigger}\n\n"
-        f"<b>Bear thesis ({sig.bear_prob}%):</b> {sig.bear_scenario}\n"
-        f"<i>Trigger:</i> {sig.bear_trigger}\n\n"
-        f"<b>Key dates:</b>\n{key_events}\n\n"
-        f"<b>Geo factor:</b> {sig.geopolitical_note}\n\n"
-        f"⚠️ <i>Educational analysis only. NOT financial advice.</i>\n"
-        f"🚧 <i>Real-time price re-verification ships in Step 12.</i>"
+        f"📊 <b>Полный анализ: {display_name(sig.asset)}</b>\n\n"
+        f"💵 <b>Цена:</b> ${sig.price:,.2f} ({sig.change_24h:+.1f}% 24h)\n\n"
+        f"📰 <b>Новости:</b>\n{news}\n\n"
+        f"📊 <b>Тренд:</b> {sig.trend or '—'}\n\n"
+        f"🐂 <b>Бык:</b> {sig.critic_bull or '—'}\n\n"
+        f"🐻 <b>Медведь:</b> {sig.critic_bear or '—'}\n\n"
+        f"🔮 <b>Прогноз:</b> {sig.prediction or sig.future_outlook or '—'}\n\n"
+        f"<i>(Deep-dive LLM упал — показываю основную карточку)</i>"
     )
+    if progress:
+        try:
+            await progress.edit_text(text, parse_mode="HTML")
+            return
+        except Exception:
+            pass
     await query.message.reply_text(text, parse_mode="HTML")
 
 

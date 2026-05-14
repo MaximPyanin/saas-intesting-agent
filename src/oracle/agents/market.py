@@ -141,6 +141,8 @@ COMMODITY_SYMBOLS: dict[str, str] = {
 # yfinance — forex (Maksim is in Warsaw, family in Belarus → PLN/BYN matter)
 FOREX_SYMBOLS: dict[str, str] = {
     "EURUSD": "EURUSD=X",  # Euro / US dollar
+    "GBPUSD": "GBPUSD=X",  # GBP / USD — needed for UCITS-on-LSE listings in GBp
+    "CHFUSD": "CHFUSD=X",  # CHF / USD — needed for SIX Swiss listings (21Shares ETPs)
     "USDPLN": "USDPLN=X",  # US dollar / Polish zloty
     "EURPLN": "EURPLN=X",  # Euro / Polish zloty
     "USDBYN": "USDBYN=X",  # US dollar / Belarusian ruble (may be flaky on yfinance)
@@ -161,6 +163,26 @@ CRYPTO_COINGECKO: dict[str, str] = {
     "ETH": "ethereum",
     "SOL": "solana",
     "XRP": "ripple",
+}
+
+# yfinance — European UCITS ETFs & crypto-ETPs that Maksim actually holds.
+# These need exchange suffixes: `.L` London, `.DE` Xetra, `.AS` Amsterdam,
+# `.SW` SIX Swiss, `.MI` Milan. The label is what Maksim sees and what's
+# stored in portfolio_holdings.asset_label — the value is the yfinance ticker.
+#
+# IMPORTANT: yfinance returns prices in the LISTING CURRENCY (often EUR or
+# GBp pence), not always USD. For now we treat them as USD-equivalent for
+# P&L display — close enough for "is my position up or down" purposes.
+# A proper FX conversion belongs to Step 21.
+EU_UCITS_SYMBOLS: dict[str, str] = {
+    "CSPX":     "CSPX.L",    # iShares Core S&P 500 UCITS (ISIN IE00B5BMR087)
+    "SMH":      "SMH.MI",    # VanEck Semiconductor UCITS (ISIN IE00BMC38736)
+    "NATO":     "NATO.L",    # HANetf Future of Defence UCITS (ISIN IE000OJ5TQP4)
+    "NUCL":     "NUCG.L",    # VanEck Uranium & Nuclear Technologies (IE000M7V94E1)
+    "EXH1":     "EXH1.DE",   # iShares STOXX Europe 600 Oil & Gas (DE000A0H08M3)
+    "IB1T":     "IB1T.DE",   # iShares Bitcoin ETP (XS2940466316)
+    "ETH-CORE": "AETH.SW",   # 21Shares Ethereum Core (SIX listing)
+    "IB01":     "IB01.L",    # iShares $ Treasury 0-1 yr UCITS (IE00B3VWN518)
 }
 
 # FRED — macro economic series
@@ -321,6 +343,7 @@ async def collect_market_data() -> tuple[dict[str, Any], list[str]]:
         "commodities":      fetch_yfinance("commodities",      COMMODITY_SYMBOLS),
         "forex":            fetch_yfinance("forex",            FOREX_SYMBOLS),
         "indices":          fetch_yfinance("indices",          INDEX_SYMBOLS),
+        "eu_ucits":         fetch_yfinance("eu_ucits",         EU_UCITS_SYMBOLS),
         "crypto":           fetch_coingecko(CRYPTO_COINGECKO),
         "macro":            fetch_fred(FRED_SERIES, settings.fred_api_key),
     }

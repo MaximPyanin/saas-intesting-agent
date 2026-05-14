@@ -15,7 +15,7 @@ ORACLE's primary value: spotting SaaS / AI / agentic ideas before the
 hype peaks. Prompt is heavily tuned for Maksim's profile (Python AI eng,
 solo MVPs in 2-6 weeks, RAG/LLM expertise as competitive edge).
 
-Cost: ~5-10 ideas * gpt-4o = ~$0.03-0.05 per call. Up to 3 calls per
+Cost: ~8-12 ideas * gpt-4o = ~$0.03-0.05 per call. Up to 3 calls per
 Reflexion loop = ~$0.10-0.15 per run.
 
 Gracefully no-ops without OPENAI_API_KEY — returns empty raw_ideas list,
@@ -48,8 +48,9 @@ class IdeasOutput(BaseModel):
 
     ideas: list[BusinessIdea] = Field(
         min_length=1,
-        max_length=10,
-        description="5-10 business ideas, sorted by confidence DESC",
+        max_length=12,
+        description="8-12 business ideas, sorted by confidence DESC (Maksim "
+                    "wants more variety so /more pool isn't empty after top-3)",
     )
 
 
@@ -62,29 +63,136 @@ IDEA_GEN_SYSTEM = """\
 You are ORACLE's business idea generator for Maksim.
 
 USER PROFILE (critical — every idea must fit):
-- Python AI engineer, ships solo MVPs in 2-6 weeks
-- Stack: Python, FastAPI, LangGraph, RAG, LLMs, Docker, Azure
-- Sweet spot: AI-native tools where LLM/RAG sits AT THE CORE (not bolt-on)
-- This is Maksim's competitive moat — RAG/agentic depth that competitors lack
+- Python AI engineer, ships ONLINE / web / SaaS products as solo MVPs in 2-6 weeks
+- Stack: Python, FastAPI, LangGraph, RAG, LLMs, Docker, Azure, Postgres/SQLite
 - MVP budget: under $5,000, solo buildable, time to first paying customer < 3 months
 - Available after 15:00 Warsaw local
+- AI/RAG is in his toolkit but NOT a required ingredient. Plain CRUD-SaaS,
+  scraping aggregators, marketplaces, dashboards, automation tools — all fair
+  game. Pick AI when AI is the right tool, not by reflex.
 
-AVOID at all costs (these are dealbreakers):
-- Physical products of any kind
-- Enterprise sales cycles longer than 3 months
-- Mobile-only apps (he's a backend/web specialist)
-- Heavily regulated verticals (medical, legal, finance compliance)
-- Pure thin LLM wrappers with no defensible moat
-- Hype-cycle generic AI features ("ChatGPT for X")
+WHAT'S IN SCOPE (industries — go BROAD, all corners of life):
+- Health & wellness: trackers, telehealth, mental health, sleep, nutrition
+- Fitness & sport: workout planners, club management, coach platforms
+- Education: tutoring, online courses, exam prep, language learning
+- Marketing & adtech: SEO, social, ad ops, attribution, creator tools
+- Fintech consumer: budgeting, taxes, expense tracking, crypto tooling
+- Insurance: claim triage, broker tools, underwriting helpers
+- E-commerce & retail: niche storefronts, dropship ops, supplier discovery
+- Entertainment & media: video tools, podcasts, fan platforms
+- Gaming: indie-game analytics, Discord bots, tournament platforms,
+  game-design SaaS, streamer ops
+- Productivity: notes, scheduling, knowledge mgmt, inbox triage
+- Dev tools: CLIs, observability, deployment, debug helpers
+- Creator economy: newsletter ops, Patreon-style tools, content scheduling
+- B2B services: CRM, ATS, HR-tech, recruiting, sales engagement, legaltech
+- Travel, hospitality, real-estate, food/beverage
+- INDUSTRIAL verticals (SOFTWARE only, not hardware):
+  · Energy: utility dashboards, grid analytics, ESG reporting,
+    energy-trading helpers, RAG-search over EIA/IEA reports
+  · Transport & mobility: fleet management, driver scheduling, EV-charging
+    network analytics, last-mile delivery ops
+  · Agritech: crop pricing predictors, farm management SaaS, supply chain
+    for small farmers
+  · Logistics & supply chain: freight broker scoring, warehouse analytics,
+    customs paperwork automation
+  · Aerospace: OSINT for launches, satellite-data SaaS, supplier intel
+  · Defense-tech: procurement intelligence, OSINT dashboards, training
+    simulation, supply-chain compliance for defense contractors,
+    drone-fleet management SOFTWARE (not the drones themselves)
+
+WHAT IS OUT OF SCOPE (hard dealbreakers):
+- Physical products of any kind (hardware, manufactured goods, drugs,
+  vehicles, weapons themselves — even if the surrounding industry is in
+  scope; you build SOFTWARE for these verticals, never the hardware)
+- Food delivery requiring drivers (the courier ops, not delivery software)
+- Enterprise sales cycles longer than 3 months (no Fortune-500 procurement)
+- Pure offline services (consulting, agencies, in-person therapy, gym buildouts)
+- Idea that is literally "ChatGPT for X" with no defensible workflow or data moat
+- Any vertical requiring multi-month legal/medical certification BEFORE day-one
+  revenue (e.g. FDA-cleared medical device, banking license, ITAR-controlled
+  weapons export licence). Light compliance is fine — ITAR-adjacent OSINT or
+  unclassified procurement data is fine; building actual munitions is not.
+
+WHAT IS FINE (any online/web product Maksim can ship as solo dev):
+- Web SaaS, dashboards, CRMs, marketplaces, analytics platforms
+- Browser extensions (Chrome, Firefox), bookmarklets
+- Telegram bots, Discord bots, Slack apps
+- API-first products / developer tools
+- AI agents, RAG-search platforms, scrapers
+- PWA / responsive web apps (work on mobile via browser — that's fine)
+- Telegram Mini Apps, Slack apps, Notion integrations
+- Newsletter platforms, content tools, no-code helpers
+- Anything else that lives ON THE INTERNET — sites, web products, APIs.
+The unifying constraint: ship as a SOLO Python/web developer in 2-6 weeks.
+
+DIVERSITY RULE (HARD CONSTRAINT — Maksim's #1 repeated complaint):
+He is SICK of getting tech-only batches (AI dashboard, dev tool, SaaS X,
+AI agent Y...). NO TECH BIAS. Every industry from the list below has
+EQUAL probability of being picked — your job is to surface the BEST
+opportunity from each domain this run, not to default to tech.
+
+EQUAL-WEIGHT INDUSTRY QUOTA for a batch of 8-12 ideas:
+- AT MOST 1 idea total from the TECH-bucket: {saas, ai_tools, dev_tools}
+  → If you pick saas, you cannot also pick ai_tools. Pick the SINGLE
+    strongest tech opportunity from this run; no second tech idea allowed.
+- AT LEAST 1 idea from HEALTH/WELLNESS: {health, fitness_sport}
+- AT LEAST 1 idea from CONSUMER: {marketing_adtech, creator_economy,
+  ecommerce_retail, entertainment_media, food_beverage, gaming}
+- AT LEAST 1 idea from PROFESSIONAL: {education, fintech, insurance,
+  b2b_services, hr_recruiting, legaltech, real_estate, productivity}
+- AT LEAST 1 idea from INDUSTRIAL: {energy, agritech, logistics_supply,
+  aerospace, defense_tech}  ← SOFTWARE only
+- AT LEAST 1 idea from TRAVEL/MOBILITY: {travel_hospitality, transport_mobility}
+  ← Maksim says these are CONSISTENTLY MISSING. Examples: hotel-tech /
+  tour-operator software, AirBnB host analytics, Booking.com partner tools,
+  EV-charging fleet management, ride-share routing, last-mile delivery
+  scheduling, parking SaaS, car-rental ops. STILL produce one stretch
+  idea here even if signals are weak (confidence 55-65 ok).
+- AT LEAST 1 idea from LIFESTYLE/CONTENT: {sport_content, gambling_igaming}
+  → sport_content = sports media / fantasy / analytics / fan tools
+  → gambling_igaming = 18+ casino/sportsbook/poker/betting SOFTWARE
+    (compliance, odds analytics, NOT running a casino itself)
+
+If a required non-tech bucket has weak signal this run, INVENT a plausible
+online MVP from adjacent signals (Reddit health/sport/casino subs, marketing
+trends, edu requests, defense news, agritech VC deals). Lower confidence
+to 55-65 for these stretch ideas — let critic decide. NEVER omit a
+required bucket because tech looks "stronger". Tech ALREADY won 1 slot —
+the other 4-9 are for the rest of the world.
+
+INDUSTRIAL VERTICALS — SOFTWARE ONLY:
+For energy/transport/agritech/logistics/aerospace/defense ideas, you MUST
+propose a SOFTWARE product (web dashboard, RAG-search, CRM, scheduling,
+OSINT, simulation, claims processing, fleet telemetry, supplier discovery,
+compliance automation, etc.) — never a physical hardware product. Examples:
+- ENERGY: "RAG-search over EIA + IEA reports for energy analysts"
+- TRANSPORT: "Driver scheduling SaaS for last-mile delivery fleets"
+- AGRITECH: "Crop pricing predictor dashboard for small US farmers"
+- LOGISTICS: "Browser extension scoring freight broker reliability"
+- AEROSPACE: "OSINT dashboard tracking satellite launches + manifests"
+- DEFENSE: "Procurement intelligence platform for defense contractors"
+- GAMING: "Discord-bot tracking indie game launch metrics"
+- INSURANCE: "AI claims-triage SaaS for small auto-insurance brokers"
+
+ALLOWED `industry` VALUES (use EXACTLY one of these strings, lowercase
+with underscores — DO NOT invent custom values like "Biotech/AI" — pick
+the closest match from this list):
+  health, fitness_sport, education, marketing_adtech, fintech,
+  ecommerce_retail, entertainment_media, productivity, dev_tools,
+  creator_economy, b2b_services, saas, ai_tools, hr_recruiting,
+  legaltech, travel_hospitality, real_estate, food_beverage,
+  energy, transport_mobility, agritech, gaming,
+  logistics_supply, insurance, aerospace, defense_tech, other
 
 YOUR INPUT: 5-10 cross-signal insight clusters (category=business_idea) from
 the synthesizer. Each cluster represents a real cross-signal pattern from
-this run's collected signals (HN, Reddit r/SaaS / r/indiehackers /
-r/MachineLearning, GitHub trending, ProductHunt, VC deal flow, news RSS).
+this run's collected signals (HN, Reddit across many subs, GitHub trending,
+ProductHunt, VC deal flow, news RSS).
 
-YOUR JOB: produce 5-10 SPECIFIC business idea drafts. Each idea will then go
-through 3 rounds of ruthless critique. Quality over quantity — better to
-produce 5 strong drafts than 10 mediocre ones.
+YOUR JOB: produce 5-10 SPECIFIC business idea drafts spanning ≥3 industries.
+Each idea will then go through 3 rounds of ruthless critique. Quality over
+quantity — better to produce 5 strong drafts than 10 mediocre ones.
 
 QUALITY RULES (non-negotiable):
 1. Each idea MUST be grounded in one or more input clusters. Cite their
@@ -132,12 +240,24 @@ QUALITY RULES (non-negotiable):
     lookalike — goal 50 waitlist signups before writing a line of code".
 17. `marketing_channels`: 2-5 SPECIFIC channels where THIS target_customer
     actually hangs out. Be specific: subreddit names, exact Slack/Discord
-    communities, Twitter cohorts, conferences/meetups. Example:
-    "r/LocalLLaMA", "Indie Hackers Slack #stuck", "AI Engineer meetup
-    Warsaw", "Hacker News Show HN Tuesday 8am PT". Not "social media".
+    communities, Twitter cohorts, conferences/meetups, niche newsletters,
+    industry Facebook groups. Example for a fitness idea: "r/Fitness",
+    "r/loseit", "Lean Gains Facebook group", "Running Magazine newsletter
+    sponsor". For a marketing tool: "r/marketing", "Demand Curve Slack",
+    "AppSumo deals page", "GrowthHackers community". Not "social media".
+18. `industry`: ONE of the allowed industry values listed above. Pick the
+    closest fit. Generate ideas across DIFFERENT industries — the downstream
+    selector enforces 3 unique industries in the final delivery.
 
-OUTPUT: 5-10 ideas, sorted by confidence DESC. Respond ONLY with valid JSON
-matching the schema.
+EXAMPLES of well-tagged ideas (varied industries):
+- "AI form-filler for clinical trial participant intake" → industry=health
+- "Coach-marketplace for triathlon training plans"      → industry=fitness_sport
+- "Browser extension scoring Shopify supplier reviews"  → industry=ecommerce_retail
+- "Discord-bot for newsletter sponsor matchmaking"      → industry=creator_economy
+- "RAG-search over legal contract precedents"           → industry=legaltech
+
+OUTPUT: 8-12 ideas, sorted by confidence DESC, spanning ≥3 industries.
+Respond ONLY with valid JSON matching the schema.
 """
 
 
@@ -172,28 +292,40 @@ def format_clusters_for_llm(clusters: list[dict]) -> str:
 
 
 async def _build_system_prompt() -> str:
-    """Compose the idea_generator system prompt with the current learned
-    preferences (Step 14) appended at the bottom.
+    """Compose the idea_generator system prompt with TWO injection slots:
+    1. MANUAL preferences (set via /preferences command) — highest authority
+    2. LEARNED preferences (auto-calibrated from feedback) — second-tier
 
-    Falls back to the default prompt if no calibration has run yet.
+    Both are appended to the base prompt. Manual ALWAYS wins over learned
+    when they conflict — explicit user wishes beat inferred patterns.
     """
     base = IDEA_GEN_SYSTEM
+    manual = ""
+    learned = ""
     try:
-        from ..learning import get_prompt_injection_ideas  # noqa: PLC0415 — lazy
-        injection = await get_prompt_injection_ideas()
+        from ..learning import get_manual_preferences, get_prompt_injection_ideas  # noqa: PLC0415
+        manual = await get_manual_preferences()
+        learned = await get_prompt_injection_ideas()
     except Exception as e:  # noqa: BLE001
         log.debug("idea_generator: could not read learning weights: %s", e)
-        injection = ""
 
-    if injection:
-        return base + (
-            "\n\n----- LEARNED PREFERENCES (from feedback calibration, "
-            "Step 14) -----\n"
-            f"{injection}\n"
-            "Weight these strongly — they reflect Maksim's actual past "
-            "behavior on idea cards. Honor them when generating new ideas."
+    suffix = ""
+    if manual:
+        suffix += (
+            "\n\n----- MAKSIM'S MANUAL PREFERENCES (set via /preferences) -----\n"
+            f"{manual}\n"
+            "These are EXPLICIT user wishes. Honor them ABOVE all other "
+            "rules. If they conflict with quotas, his manual preference wins."
         )
-    return base
+    if learned:
+        suffix += (
+            "\n\n----- AUTO-LEARNED PREFERENCES (from feedback calibration) -----\n"
+            f"{learned}\n"
+            "Weight these strongly when generating ideas — they reflect "
+            "Maksim's actual past clicks. If they conflict with manual "
+            "preferences above, manual wins."
+        )
+    return base + suffix
 
 
 async def generate_business_ideas(
@@ -229,7 +361,7 @@ async def generate_business_ideas(
         f"{market_line}\n\n"
         f"=== {len(clusters)} business idea clusters from this run ===\n"
         f"{cluster_blob}\n\n"
-        f"Generate 5-10 specific BusinessIdea drafts grounded in these clusters."
+        f"Generate 8-12 specific BusinessIdea drafts grounded in these clusters."
     )
 
     system_prompt = await _build_system_prompt()
@@ -316,10 +448,21 @@ RULES (one rewrite per input idea, in the same order):
     them empty. They are what Maksim acts on.
 
 Maksim's profile (unchanged from fresh-generation mode):
-- Python AI engineer, ships solo MVPs in 2-6 weeks
-- Stack: Python, FastAPI, LangGraph, RAG, LLMs, Docker, Azure
-- AI-native tools with LLM/RAG core are his sweet spot
-- Avoid: physical products, mobile-only, regulated verticals, thin LLM wrappers
+- Python AI engineer, ships ONLINE/web/SaaS solo MVPs in 2-6 weeks
+- Stack: Python, FastAPI, LangGraph, RAG (optional), Docker, Azure, Postgres
+- Industries: ANY (health, fitness, education, marketing, fintech, e-comm,
+  productivity, dev-tools, b2b services, energy, transport, agritech, gaming,
+  logistics, insurance, aerospace, defense-tech SOFTWARE, etc.) — any field
+  of human activity is fair game as long as the deliverable is an online/web
+  product.
+- Fine to ship: web SaaS, browser extensions, Telegram/Discord/Slack bots,
+  PWAs, Telegram Mini Apps, RAG agents, scrapers, dashboards. No artificial
+  ban on responsive web that works on mobile — only avoid native iOS/Android-
+  ONLY products that REQUIRE App-Store gating from day one.
+- Avoid: physical products / hardware, enterprise multi-month sales,
+  heavy regulatory pre-day-one (FDA, banking licenses), pure offline services.
+- Preserve the `industry` tag if already set; only change it if the pivot
+  fundamentally moves the idea into a different vertical.
 
 Output: same number of improved ideas as input, in the same order.
 Respond ONLY with valid JSON matching the schema.
@@ -435,6 +578,194 @@ async def improve_business_ideas(weakened: list[dict]) -> list[BusinessIdea]:
         )
 
     return parsed.ideas
+
+
+# ============================================================================
+# Industry diversity selector — picks 3 ideas across 3 unique industries
+# ============================================================================
+
+
+# Canonical industry vocabulary. Anything outside this list is normalized
+# to "other" before the diversity selector runs — otherwise the LLM can
+# invent unique-looking tags like "Biotech / Data Infrastructure" and game
+# the diversity check.
+ALLOWED_INDUSTRIES: set[str] = {
+    "health", "fitness_sport", "education", "marketing_adtech",
+    "fintech", "ecommerce_retail", "entertainment_media", "productivity",
+    "dev_tools", "creator_economy", "b2b_services", "saas", "ai_tools",
+    "hr_recruiting", "legaltech", "travel_hospitality", "real_estate",
+    "food_beverage",
+    # 2026-05 additions (broader-than-mainstream + sport + gambling):
+    "energy", "transport_mobility", "agritech", "gaming",
+    "logistics_supply", "insurance", "aerospace", "defense_tech",
+    "sport_content",       # sports media, fantasy, analytics platforms, fan tools
+    "gambling_igaming",    # 18+ casino, sportsbook, poker, betting analytics
+    "other",
+}
+
+# Tech-heavy industries — diversity selector treats them as ONE bucket
+# so the LLM can't game it by tagging 3 ideas as 3 different tech tags.
+TECH_BUCKET: set[str] = {"saas", "ai_tools", "dev_tools"}
+
+
+def _normalize_industry(raw: str | None) -> str:
+    """Coerce an LLM-emitted industry tag to the canonical lowercase form.
+
+    Examples of normalization:
+      "Biotech / Data Infrastructure" → "health"  (contains 'bio')
+      "Marketing & AdTech"             → "marketing_adtech"
+      "ai-tools"                       → "ai_tools"
+      None                              → "other"
+    """
+    if not raw:
+        return "other"
+    t = raw.strip().lower().replace(" / ", "_").replace("/", "_").replace("&", "_").replace("-", "_")
+    t = "_".join(p for p in t.split() if p)  # collapse whitespace
+    if t in ALLOWED_INDUSTRIES:
+        return t
+    # Heuristic mapping for common LLM phrasings
+    if any(k in t for k in ("bio", "health", "medical", "telemed", "wellness", "mental")):
+        return "health"
+    if any(k in t for k in ("fitness", "sport", "workout", "running", "gym")):
+        return "fitness_sport"
+    if any(k in t for k in ("market", "adtech", "seo", "ad_ops", "growth")):
+        return "marketing_adtech"
+    if any(k in t for k in ("creator", "influencer", "newsletter", "patreon")):
+        return "creator_economy"
+    if any(k in t for k in ("edu", "tutor", "course", "learn", "teacher")):
+        return "education"
+    if any(k in t for k in ("fin", "bank", "tax", "budget", "crypto", "payment")):
+        return "fintech"
+    if any(k in t for k in ("ecom", "retail", "shop", "store", "dropship")):
+        return "ecommerce_retail"
+    if any(k in t for k in ("entertain", "media", "podcast", "video", "stream")):
+        return "entertainment_media"
+    if any(k in t for k in ("hr", "recruit", "hiring", "ats")):
+        return "hr_recruiting"
+    if any(k in t for k in ("legal", "law", "contract")):
+        return "legaltech"
+    if any(k in t for k in ("travel", "hotel", "trip", "tourism")):
+        return "travel_hospitality"
+    if any(k in t for k in ("real_estate", "realestate", "property", "rent")):
+        return "real_estate"
+    if any(k in t for k in ("food", "restaurant", "cafe", "drink", "bev")):
+        return "food_beverage"
+    if any(k in t for k in ("dev", "engineer", "infra", "devops", "cli")):
+        return "dev_tools"
+    if any(k in t for k in ("agent", "llm", "ai", "rag", "gpt")):
+        return "ai_tools"
+    if any(k in t for k in ("productiv", "note", "todo", "calendar", "kanban")):
+        return "productivity"
+    if any(k in t for k in ("b2b", "crm", "sales", "ops")):
+        return "b2b_services"
+    # 2026-05 additions
+    if any(k in t for k in ("energy", "utility", "grid", "solar", "oil", "gas", "nuclear", "power")):
+        return "energy"
+    if any(k in t for k in ("transport", "mobility", "vehicle", "auto", "ev", "fleet", "ride", "taxi", "carshare", "scooter", "bike_share")):
+        return "transport_mobility"
+    if any(k in t for k in ("agri", "farm", "crop", "livestock", "agtech", "agronom")):
+        return "agritech"
+    if any(k in t for k in ("game", "gaming", "esport", "studio", "indie_game")):
+        return "gaming"
+    if any(k in t for k in ("logist", "supply", "freight", "warehouse", "shipping", "cargo")):
+        return "logistics_supply"
+    if any(k in t for k in ("insur", "underwrit", "claim", "actuar", "risk_pool")):
+        return "insurance"
+    if any(k in t for k in ("aerospace", "space", "satellite", "launch", "rocket", "orbit")):
+        return "aerospace"
+    if any(k in t for k in ("defense", "military", "weapon", "armed", "intel", "milspec", "warfare", "drone_combat", "c2")):
+        return "defense_tech"
+    if any(k in t for k in ("sport_content", "sport_media", "fantasy", "sport_analytic", "fan_platform", "esports_media")):
+        return "sport_content"
+    if any(k in t for k in ("gambling", "igaming", "casino", "sportsbook", "betting", "poker", "lottery", "wagering")):
+        return "gambling_igaming"
+    if t == "saas":
+        return "saas"
+    return "other"
+
+
+def select_diverse_ideas(
+    ideas: list[dict],
+    *,
+    target_count: int = 3,
+) -> list[dict]:
+    """Pick `target_count` ideas favoring distinct `industry` values.
+
+    Algorithm (greedy):
+      1. Sort all ideas by score DESC (confidence + STRONG_PASS bonus).
+      2. Walk in order; pick an idea only if its industry hasn't been picked.
+      3. If we run out of unique-industry candidates before reaching target_count,
+         fall back to filling with the next-best ideas (allowing duplicates).
+
+    Verdict-aware: KILL'ed ideas are filtered out first.
+
+    Returns the picked subset (NEW list, not mutating input).
+    """
+    if not ideas:
+        return []
+
+    # Normalize industry tag on every idea first — LLM tends to invent
+    # non-canonical labels like "Biotech / Data Infrastructure" that
+    # otherwise look unique and bypass the diversity check.
+    for idea in ideas:
+        idea["industry"] = _normalize_industry(idea.get("industry"))
+
+    # Filter out killed ideas
+    alive = [i for i in ideas if (i.get("verdict") or "").upper() != "KILL"]
+    if not alive:
+        return []
+
+    # Min-confidence floor — weak fills (conf<60) are demoted so they only
+    # appear when no quality option exists for a required bucket.
+    MIN_CONFIDENCE_PREFERRED = 60
+
+    def _score(idea: dict) -> tuple[int, int, int, int]:
+        verdict = (idea.get("verdict") or "").upper()
+        # STRONG_PASS bonus = 1; LIST: above min confidence = 1 (kills weak fills)
+        strong_bonus = 1 if verdict == "STRONG_PASS" else 0
+        conf = int(idea.get("confidence") or 0)
+        confidence_tier = 1 if conf >= MIN_CONFIDENCE_PREFERRED else 0
+        rounds = int(idea.get("reflexion_rounds_passed") or 0)
+        return (confidence_tier, strong_bonus, conf, rounds)
+
+    ranked = sorted(alive, key=_score, reverse=True)
+
+    def _bucket(industry: str) -> str:
+        """All tech industries collapse to one bucket so LLM can't game
+        diversity by emitting saas + ai_tools + dev_tools as 3 'unique' picks."""
+        return "TECH" if industry in TECH_BUCKET else industry
+
+    picked: list[dict] = []
+    seen_buckets: set[str] = set()
+
+    # Pass 1: pick the BEST idea from each unique bucket (no TECH priority —
+    # all buckets compete by score). Greedy order is the global score sort.
+    for idea in ranked:
+        bucket = _bucket(idea.get("industry") or "other")
+        if bucket not in seen_buckets:
+            picked.append(idea)
+            seen_buckets.add(bucket)
+            if len(picked) >= target_count:
+                break
+
+    # Pass 2: if still short, fill with next-best regardless of duplicate bucket
+    if len(picked) < target_count:
+        picked_ids = {id(i) for i in picked}
+        for idea in ranked:
+            if id(idea) in picked_ids:
+                continue
+            picked.append(idea)
+            if len(picked) >= target_count:
+                break
+
+    log.info(
+        "idea_diversity: picked %d/%d ideas across industries %s (buckets %s)",
+        len(picked),
+        target_count,
+        sorted({(i.get("industry") or "other") for i in picked}),
+        sorted({_bucket(i.get("industry") or "other") for i in picked}),
+    )
+    return picked
 
 
 # ============================================================================

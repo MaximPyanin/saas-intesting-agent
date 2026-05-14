@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 DB_PATH = Path("oracle_data.db")
 
 # Bump this when schema changes; init_db() applies missing migrations idempotently.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # Connection-level pragmas — applied on every aiosqlite.connect.
 # - foreign_keys: enforce FK constraints (off by default in SQLite, surprising)
@@ -222,16 +222,66 @@ CREATE TABLE IF NOT EXISTS portfolio_holdings (
     asset_label     TEXT NOT NULL,                 -- must match a label in market.py
                                                     -- catalogs (e.g. 'BTC','NVDA','GOLD','EURPLN')
     asset_class     TEXT NOT NULL,                 -- 'crypto','stock','etf','commodity','forex','cash'
-    quantity        REAL NOT NULL,                 -- units owned (BTC, shares, oz, ...)
-    avg_buy_price   REAL NOT NULL,                 -- average entry in USD
+    quantity        REAL NOT NULL DEFAULT 0.0,     -- units owned (BTC, shares, oz, ...). 0 = unknown / USD-only
+    avg_buy_price   REAL NOT NULL DEFAULT 0.0,     -- average entry in USD. 0 = unknown / USD-only
     currency        TEXT NOT NULL DEFAULT 'USD',   -- entry currency (USD/PLN/EUR/...)
     notes           TEXT,                          -- free-form ('long-term hold','swing','staking',...)
     added_at        TEXT NOT NULL,                 -- ISO 8601 UTC of first add
     updated_at      TEXT NOT NULL,                 -- ISO 8601 UTC of last edit
+    -- v5 additions:
+    usd_invested    REAL,                          -- $-cost-basis when quantity/price not tracked (ETFs entered by $ amount)
+    isin            TEXT,                          -- ISIN identifier (ETFs, bonds, crypto-ETPs)
+    price_at_add    REAL,                          -- market price snapshot at the moment of add (for P&L drift)
     UNIQUE(asset_label)                            -- one row per asset; re-add updates avg
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_class ON portfolio_holdings(asset_class);
+
+-- ----------------------------------------------------------------------------
+-- investment_watchlist — assets Maksim tapped "📌 Watch" on
+-- Used by alerts.py to fire custom alerts when watched asset moves ±5% from
+-- the price baseline captured at the moment of the tap.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS investment_watchlist (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_label     TEXT NOT NULL,                 -- e.g. 'NUCL', 'BTC'
+    baseline_price  REAL NOT NULL,                 -- price when Maksim tapped Watch
+    added_at        TEXT NOT NULL,                 -- ISO 8601 UTC
+    source_sig_id   TEXT,                          -- digest signal id (for context)
+    user_note       TEXT,                          -- optional free-text
+    last_alert_at   TEXT,                          -- ISO 8601 UTC of last fired alert (dedup)
+    is_active       INTEGER NOT NULL DEFAULT 1,    -- 0 if user removed it
+    UNIQUE(asset_label)                            -- one active watch per asset
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_active ON investment_watchlist(is_active);
 """
+
+
+# ============================================================================
+# Migrations
+# ============================================================================
+
+
+async def _migrate_v4_to_v5(conn: aiosqlite.Connection) -> None:
+    """Add usd_invested, isin, price_at_add columns to portfolio_holdings.
+
+    SQLite ALTER TABLE doesn't support `IF NOT EXISTS` for ADD COLUMN, so we
+    introspect via PRAGMA table_info to make this idempotent.
+    """
+    cursor = await conn.execute("PRAGMA table_info(portfolio_holdings)")
+    rows = await cursor.fetchall()
+    existing_cols = {row[1] for row in rows}  # row[1] = column name
+
+    to_add: list[tuple[str, str]] = []
+    if "usd_invested" not in existing_cols:
+        to_add.append(("usd_invested", "REAL"))
+    if "isin" not in existing_cols:
+        to_add.append(("isin", "TEXT"))
+    if "price_at_add" not in existing_cols:
+        to_add.append(("price_at_add", "REAL"))
+
+    for col_name, col_type in to_add:
+        log.info("migration v5: adding column %s %s to portfolio_holdings", col_name, col_type)
+        await conn.execute(f"ALTER TABLE portfolio_holdings ADD COLUMN {col_name} {col_type}")
 
 
 # ============================================================================
@@ -274,6 +324,8 @@ async def init_db(db_path: Path | str = DB_PATH) -> None:
     log.info("init_db: ensuring schema at %s (version %d)", db_path, SCHEMA_VERSION)
     async with get_db(db_path) as conn:
         await conn.executescript(SCHEMA_SQL)
+        # Apply v4 -> v5 migration (idempotent — checks PRAGMA table_info)
+        await _migrate_v4_to_v5(conn)
         await conn.execute(
             "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION, datetime.now(timezone.utc).isoformat()),

@@ -82,10 +82,37 @@ INVEST_REFLEXION_MAX = 2
 # ---------- Layer 3: format ----------
 
 async def formatter_node(state: OracleState) -> dict:
-    log.info("formatter: placeholder")
+    """Final formatter — applies industry-diversity selection on ideas.
+
+    Before this step, `state["validated"]` contains ALL surviving ideas (5-10).
+    Maksim wants exactly 3 ideas per digest, each from a DIFFERENT industry.
+    But the EXTRA validated ideas (4-7 more) are also useful — they're
+    surfaced via the /more command if Maksim wants another round from
+    different buckets. So we expose both `ideas` and `ideas_extra`.
+
+    Investment scenarios pass through unchanged (the per-holding rule is
+    enforced inside investment_analyzer_node itself).
+    """
+    from .agents.idea_generator import select_diverse_ideas  # noqa: PLC0415
+
+    validated = state.get("validated", []) or []
+    top_3 = select_diverse_ideas(validated, target_count=3)
+    # Stable id-based set difference so the extras don't repeat the top-3
+    picked_ids = {id(i) for i in top_3}
+    extras = [i for i in validated if id(i) not in picked_ids]
+
+    log.info(
+        "formatter: %d validated → %d diverse ideas + %d extras; %d invest scenarios",
+        len(validated),
+        len(top_3),
+        len(extras),
+        len(state.get("investment_scenarios", []) or []),
+    )
+
     return {
         "final_digest": {
-            "ideas": state.get("validated", []),
+            "ideas": top_3,
+            "ideas_extra": extras,
             "investments": state.get("investment_scenarios", []),
         }
     }

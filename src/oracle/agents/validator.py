@@ -151,24 +151,139 @@ async def ddg_search(
 async def search_competitors_for_ideas(
     surviving_ideas: list[dict],
 ) -> list[list[dict]]:
-    """Run one DDG search per idea in parallel. Returns list of result-lists."""
+    """Run THREE search queries per idea in parallel, dedupe, return per-idea
+    aggregate (max 8 unique results each).
+
+    The three queries:
+      1. `<title> alternatives competitor`  — direct competitors
+      2. `<key-noun-from-problem> tool 2026`  — problem-space players
+      3. `<title> market size`              — rough market sizing snippets
+
+    Why three? Single-query DDG sometimes returns mostly the idea's own
+    domain or affiliate spam. Three semantically-different queries widen
+    coverage and reduce DuckDuckGo dependency by also pulling signals DB
+    matches (handled separately by `_fetch_db_evidence`).
+    """
+    import re  # noqa: PLC0415
+
+    def _problem_keywords(problem: str) -> str:
+        """Extract the 2-3 most signal-rich nouns/phrases from the problem.
+
+        Heuristic: take the first sentence, drop common stopwords, keep
+        capitalized words and 4-6 char nouns. Returns a 2-4 word query."""
+        first = problem.split(".")[0][:200]
+        # Drop very-common english stopwords + filler
+        STOP = {
+            "the","and","for","with","that","this","have","need","lack",
+            "are","but","not","they","when","then","than","from","more",
+            "less","into","each","over","most","also","like","such","very",
+            "to","of","a","an","in","on","is","it","by","as","or","at",
+        }
+        tokens = re.findall(r"[A-Za-z][A-Za-z\-]+", first.lower())
+        keep = [t for t in tokens if len(t) >= 4 and t not in STOP][:4]
+        return " ".join(keep) if keep else first[:60]
+
     headers = {"User-Agent": BROWSER_UA}
     async with httpx.AsyncClient(timeout=DDG_TIMEOUT, headers=headers, follow_redirects=True) as client:
-        tasks = []
+        tasks_per_idea: list[list] = []
         for idea in surviving_ideas:
             title = idea.get("title", "")
-            # Query: title + "alternatives" tends to surface direct competitors
-            query = f"{title} alternatives competitor"
-            tasks.append(ddg_search(client, query, max_results=5))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            problem = idea.get("problem") or ""
+            q1 = f"{title} alternatives competitor"
+            q2 = f"{_problem_keywords(problem)} software platform"
+            q3 = f"{title} market size 2026"
+            tasks_per_idea.append([
+                ddg_search(client, q1, max_results=4),
+                ddg_search(client, q2, max_results=3),
+                ddg_search(client, q3, max_results=2),
+            ])
+        flat = [t for triple in tasks_per_idea for t in triple]
+        results = await asyncio.gather(*flat, return_exceptions=True)
 
+    # Re-shape back into per-idea aggregates + dedupe by URL
     cleaned: list[list[dict]] = []
-    for r in results:
-        if isinstance(r, Exception):
-            cleaned.append([])
-        else:
-            cleaned.append(r)
+    cursor = 0
+    for _ in surviving_ideas:
+        triple = results[cursor:cursor + 3]
+        cursor += 3
+        agg: list[dict] = []
+        seen_urls: set[str] = set()
+        for chunk in triple:
+            if isinstance(chunk, Exception):
+                continue
+            for r in chunk:
+                key = r.get("url", "")
+                if key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                agg.append(r)
+                if len(agg) >= 8:
+                    break
+            if len(agg) >= 8:
+                break
+        cleaned.append(agg)
     return cleaned
+
+
+async def _fetch_db_evidence(idea: dict, limit: int = 3) -> list[dict]:
+    """Pull supporting evidence for an idea from our own signals table.
+
+    Reduces DuckDuckGo dependency by surfacing news we've already collected
+    that mention the same niche keywords. Returns up to `limit` headlines
+    formatted like DDG results so validator can mix them in seamlessly.
+    """
+    from ..db import get_db  # noqa: PLC0415
+
+    title = idea.get("title", "") or ""
+    problem = idea.get("problem", "") or ""
+    # Pull 3-5 longish words from title + problem as keywords
+    import re  # noqa: PLC0415
+    text = (title + " " + problem).lower()
+    candidates = [w for w in re.findall(r"[a-z][a-z\-]{4,}", text)]
+    # Dedupe + drop common words
+    STOP = {
+        "alternative","alternatives","competitor","competitors","platform",
+        "software","tool","tools","management","analytics","through","without",
+        "across","being","because","cannot","customer","customers",
+    }
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for w in candidates:
+        if w in STOP or w in seen:
+            continue
+        seen.add(w)
+        keywords.append(w)
+        if len(keywords) >= 4:
+            break
+
+    if not keywords:
+        return []
+
+    where_clauses = " OR ".join(["LOWER(title) LIKE ?"] * len(keywords))
+    params = [f"%{k}%" for k in keywords]
+    try:
+        async with get_db() as conn:
+            async with conn.execute(
+                f"""SELECT title, url, source_id FROM signals
+                    WHERE ({where_clauses})
+                      AND datetime(published_at) >= datetime('now', '-7 days')
+                    ORDER BY published_at DESC
+                    LIMIT ?""",
+                (*params, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+    except Exception as e:  # noqa: BLE001
+        log.debug("validator: DB evidence failed: %s", e)
+        return []
+
+    return [
+        {
+            "title": (r[0] if isinstance(r, tuple) else r["title"])[:160],
+            "url":   (r[1] if isinstance(r, tuple) else r["url"]) or "",
+            "snippet": f"From {r[2] if isinstance(r, tuple) else r['source_id']} (ORACLE signals DB)",
+        }
+        for r in rows
+    ]
 
 
 # ============================================================================
@@ -332,14 +447,34 @@ def lookup_current_price(asset_name: str, market_data: dict) -> float | None:
 
     Step 4 collects market data ~30s before the validator runs, so prices
     here are essentially live for the validation purpose.
+
+    For EU UCITS tickers (CSPX/SMH/NATO/NUCL/EXH1/IB1T/AETH/IB01) we look
+    in the `eu_ucits` bucket FIRST and apply FX conversion so the price
+    is comparable to what the scenario already stored (always USD).
+    Otherwise validator computes huge fake drift (e.g. ETH-CORE listed
+    in USD at $19 vs ETH spot at $2,200 — 11,500% drift, false-positive
+    STALE flag).
     """
     name = asset_name.upper().strip()
-    # Direct key match in any bucket
-    for bucket_key in ("equities", "stocks", "crypto", "commodities", "forex", "indices"):
+    # 1. Prefer eu_ucits bucket for European UCITS labels (USD-converted)
+    from ..portfolio import EU_UCITS_CURRENCY, _to_usd  # noqa: PLC0415
+    if name in EU_UCITS_CURRENCY:
+        bucket = market_data.get("eu_ucits", {}) or {}
+        if name in bucket:
+            raw = float(bucket[name].get("price", 0)) or None
+            if raw is None:
+                return None
+            return _to_usd(raw, EU_UCITS_CURRENCY[name], market_data)
+        return None
+
+    # 2. Direct key match in standard buckets
+    for bucket_key in ("equities", "stocks", "nuclear", "drones_defense",
+                       "trump_political", "crypto", "commodities", "forex",
+                       "indices", "eu_ucits"):
         bucket = market_data.get(bucket_key, {}) or {}
         if name in bucket:
             return float(bucket[name].get("price", 0)) or None
-    # Fuzzy match: handles "Gold (XAU/USD)" → "GOLD"
+    # 3. Fuzzy match: handles "Gold (XAU/USD)" → "GOLD"
     for bucket_key in ("equities", "stocks", "crypto", "commodities", "forex", "indices"):
         bucket = market_data.get(bucket_key, {}) or {}
         for key in bucket:
@@ -411,13 +546,31 @@ async def validator_node(state: OracleState) -> dict:
     if not surviving and not scenarios:
         return {"validated": [], "investment_scenarios": []}
 
-    # 1. Idea validation: web search + LLM reasoning
+    # 1. Idea validation: web search (3 queries) + our own signals DB + LLM
     validated_ideas: list[dict] = []
     if surviving:
-        log.info("validator: searching DuckDuckGo for %d ideas in parallel", len(surviving))
+        log.info(
+            "validator: 3-query DDG search + signals-DB evidence for %d ideas",
+            len(surviving),
+        )
         search_results = await search_competitors_for_ideas(surviving)
+
+        # Also pull evidence from our own signals DB to reduce DDG dependency.
+        # Merge each idea's DB hits into its search_results list (deduped by URL).
+        db_evidence_tasks = [_fetch_db_evidence(idea, limit=3) for idea in surviving]
+        db_results = await asyncio.gather(*db_evidence_tasks, return_exceptions=True)
+        for i, (web, db) in enumerate(zip(search_results, db_results)):
+            if isinstance(db, Exception):
+                continue
+            seen = {r.get("url", "") for r in web}
+            for hit in db:
+                if hit["url"] and hit["url"] in seen:
+                    continue
+                web.append(hit)
+                seen.add(hit["url"])
+
         results_per_idea = sum(len(r) for r in search_results)
-        log.info("validator: got %d total search results", results_per_idea)
+        log.info("validator: got %d total evidence items (web + DB combined)", results_per_idea)
 
         validations = await call_validator_llm(surviving, search_results)
         val_by_idx: dict[int, IdeaValidation] = {v.idea_index: v for v in validations}

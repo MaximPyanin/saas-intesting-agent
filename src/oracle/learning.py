@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 
 # Recalibrate every N new feedbacks since the last calibration.
 # Lowering this means fresher personalization but more LLM calls.
-CALIBRATION_THRESHOLD = 30
+CALIBRATION_THRESHOLD = 20
 
 # Cap how many recent feedbacks the LLM sees per calibration.
 # 100 keeps the prompt small and weights recent preferences higher.
@@ -197,6 +197,34 @@ async def get_weekly_summary() -> str:
     return row[0] if row and row[0] else ""
 
 
+async def get_manual_preferences() -> str:
+    """Manual preference text set by Maksim via /preferences command.
+
+    Coexists with the auto-learned `prompt_injection_ideas` — both are
+    appended to the idea_generator system prompt. Manual is read first so
+    explicit user wishes always win over inferred patterns.
+
+    Returns empty string if never set.
+    """
+    async with get_db() as conn:
+        async with conn.execute(
+            "SELECT text_value FROM learning_weights WHERE key = 'manual_preferences'"
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row and row[0] else ""
+
+
+async def set_manual_preferences(text: str) -> None:
+    """Persist Maksim's manual preference text (or empty to clear)."""
+    cleaned = (text or "").strip()
+    await _upsert_weight(
+        "manual_preferences",
+        None,
+        cleaned if cleaned else None,
+        rationale="manual /preferences command",
+    )
+
+
 async def _upsert_weight(
     key: str, value: float | None, text_value: str | None, rationale: str
 ) -> None:
@@ -268,12 +296,21 @@ solo MVPs (2-6 weeks each, RAG/LangGraph stack).
 You receive Maksim's recent feedback on business ideas and investment signals
 from his Telegram bot. Each feedback row contains:
   - item_type: 'idea' or 'investment_signal'
-  - feedback_type: 'like' / 'dislike' / 'save' / 'deep_dive'
+  - feedback_type: 'like' / 'dislike' / 'save' / 'build' / 'deep_dive'
   - reason: dislike reason (competitors / customer / revenue / complex /
             market / timing) — only set for dislikes on ideas
   - item_snapshot: JSON of the full BusinessIdea or InvestmentSignal at the
                    time of feedback (so weights work even if the item has
                    since evolved)
+
+WEIGHT BY FEEDBACK TYPE (Maksim's signal strength):
+  - 'build'   = 5x  (highest — he's actually going to ship this)
+  - 'save'    = 3x  (saved for later — strong interest)
+  - 'like'    = 2x  (positive reaction)
+  - 'deep_dive' = 1.5x  (curiosity, not commitment)
+  - 'dislike' = 2x negative (with reason → tells us what to avoid)
+When inferring preferences, weight clusters of 'build' or 'save' MUCH
+heavier than 'like'. A single 'build' is worth ~3 'like's of evidence.
 
 YOUR JOB: extract patterns and produce a `prompt_injection_ideas` text that
 will steer FUTURE idea generation toward what Maksim actually likes.

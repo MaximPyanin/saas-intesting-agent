@@ -57,14 +57,28 @@ SCOUT_FEEDS: dict[str, str] = {
     "ap/business":          "https://feeds.ap.org/rss/apf-business",
     "isw/main":             "https://understandingwar.org/rss.xml",
 
-    # ----- Google News meta-aggregator workarounds for the dead spec feeds.
-    # Google News crawls everything, so we can target Reuters/AP/etc. via
-    # site: filter. Always reachable, no auth, content quality matches the
-    # original publisher. -----
+    # ----- Google News meta-aggregator (always reachable, broad coverage) ----
+    "gnews/world":            "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+    "gnews/business":         "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+    "gnews/technology":       "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
+    "gnews/health":           "https://news.google.com/rss/headlines/section/topic/HEALTH?hl=en-US&gl=US&ceid=US:en",
+    "gnews/sports":           "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
+    "gnews/entertainment":    "https://news.google.com/rss/headlines/section/topic/ENTERTAINMENT?hl=en-US&gl=US&ceid=US:en",
     "gnews/reuters-business": "https://news.google.com/rss/search?q=site:reuters.com+business&hl=en-US&gl=US&ceid=US:en",
     "gnews/reuters-tech":     "https://news.google.com/rss/search?q=site:reuters.com+technology&hl=en-US&gl=US&ceid=US:en",
     "gnews/ap-business":      "https://news.google.com/rss/search?q=site:apnews.com+business&hl=en-US&gl=US&ceid=US:en",
     "gnews/wsj":              "https://news.google.com/rss/search?q=site:wsj.com&hl=en-US&gl=US&ceid=US:en",
+
+    # ----- Targeted high-quality sources (manually-curated, low-noise) -----
+    "stratechery/ben-thompson": "https://stratechery.com/feed/",
+    "axios/business":           "https://api.axios.com/feed/business",
+    "marginal-revolution":      "https://marginalrevolution.com/feed",
+    "tld":                      "https://tldr.tech/api/latest/rss",
+    "calc/calculatedrisk":      "https://www.calculatedriskblog.com/feeds/posts/default",
+    # Sport / fan culture
+    "gnews/igaming-betting":    "https://news.google.com/rss/search?q=igaming+OR+sports+betting+OR+online+casino&hl=en-US&gl=US&ceid=US:en",
+    "gnews/gambling-industry":  "https://news.google.com/rss/search?q=gambling+industry+revenue&hl=en-US&gl=US&ceid=US:en",
+    "gnews/sport-business":     "https://news.google.com/rss/search?q=sports+business+OR+sports+sponsorship&hl=en-US&gl=US&ceid=US:en",
 
     # ----- Known-working direct feeds (always reachable) -----
     "bbc/business":         "http://feeds.bbci.co.uk/news/business/rss.xml",
@@ -72,6 +86,7 @@ SCOUT_FEEDS: dict[str, str] = {
     "guardian/business":    "https://www.theguardian.com/uk/business/rss",
     "npr/business":         "https://feeds.npr.org/1006/rss.xml",
     "yahoo/finance":        "https://finance.yahoo.com/news/rssindex",
+    "yahoo/sports":         "https://sports.yahoo.com/rss/",
 }
 
 HTTP_TIMEOUT = 20.0

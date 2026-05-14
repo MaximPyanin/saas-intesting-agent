@@ -70,64 +70,82 @@ class InvestmentCriticOutput(BaseModel):
 
 
 INVESTMENT_CRITIC_SYSTEM = """\
-You are ORACLE's ruthless critic for Maksim's INVESTMENT trader briefs.
+You are ORACLE's critic for Maksim's investment trader briefs.
 
-Maksim reads these at 08:00 on his phone and wants to act. A vague card
-is WORSE than no card. Your job: KILL vague/incoherent briefs, WEAKEN
-salvageable ones, PASS operational ones, STRONG_PASS gold-standard ones.
+Card structure Maksim reads (in this order):
+  asset · price · 24h%
+  news_highlights (2-3 headlines)
+  trend (1-2 sentences on CURRENT momentum)
+  critic_bull (bull argument with numbers/names)
+  critic_bear (bear argument with numbers/names)
+  action + do_now (verdict headline)
+  how_to_execute + why_now_short (concrete execution)
+  prediction (1-2 sentences forecast 1-4 weeks)
 
-ATTACK EACH SCENARIO ALONG 6 AXES:
+VALIDATE EACH SCENARIO ALONG 6 AXES:
 
-1. DO_NOW MUST BE OPERATIONAL
-   - BAD: "Consider entering NVDA", "Interesting setup here", "Watch for
-     breakout", "Monitor closely". KILL or WEAKEN.
-   - GOOD: "Меняй USD → PLN сегодня", "Держишь слиток — не трогаешь",
-     "Жди пробой $215 — не раньше", "Продавай 30% золота сейчас".
+1. trend — must reference CURRENT momentum with numbers (24h or 7d %).
+   BAD: "позиция работает в фоне", "сектор стабилен". WEAKEN.
+   GOOD: "Уран -5% за день, 7d momentum +18% — техническая просадка".
 
-2. HOW_TO_EXECUTE MUST NAME BROKER + SIZE + PRICE
-   - BAD: "Buy on pullback", "Consider accumulating", empty string when
-     action is BUY/ADD/SELL/TRIM. WEAKEN.
-   - GOOD: "Wise/Revolut, 5000 USD → PLN по курсу 3.58", "IBKR market
-     buy 10 AVAV shares на открытии; стоп 192", "Binance limit BTC
-     @ $68k size 0.05".
-   - Acceptable to be "—" ONLY when action is pure WAIT/HOLD/AVOID.
+2. critic_bull / critic_bear — must be CONCRETE, with names/numbers.
+   BAD: "Базовая диверсифицированная позиция — индексы растут".
+   GOOD: "AI-PPA Microsoft + Amazon $13bn — структурный спрос 10 лет".
+   If both critics sound generic / interchangeable across multiple
+   assets → WEAKEN, instruct rewriter to make them asset-specific.
 
-3. PORTFOLIO COVERAGE RULE
-   - Check the PORTFOLIO block in the input.
-   - If Maksim holds N>=2 assets, AT LEAST ⌈N*2/3⌉ scenarios must
-     address held assets. If this run violates the rule, WEAKEN the
-     "least-relevant non-held" scenario and instruct the rewriter to
-     swap in a scenario for a held asset.
+3. news_highlights — non-empty (≥1 headline) if asset has any signal
+   in market context. Empty array allowed only for off-broker assets
+   (GOLD-PHYS, CASH-USD). WEAKEN otherwise.
 
-4. INTERNAL CONSISTENCY
-   - action=BUY or ADD but bull_prob < 50 → WEAKEN (fix mismatch).
-   - action=SELL or TRIM when is_portfolio_holding=False → KILL
-     (you can't sell what you don't hold).
-   - action=ADD when is_portfolio_holding=False → WEAKEN (should be BUY).
-   - strength=9+ but do_now says "wait / monitor" → WEAKEN.
+4. do_now MUST BE OPERATIONAL (Russian imperative).
+   BAD: "Consider entering", "Interesting setup", "Monitor closely".
+   GOOD: "Меняй USD → PLN сегодня", "Жди пробой $215", "Продавай 30%".
 
-5. STALE / HALLUCINATED DATES
-   - `key_events` contains years < 2026 → WEAKEN (force rewriter to use
-     realistic upcoming dates in next ~3 months).
-   - References to events that already happened → WEAKEN.
+5. how_to_execute MUST NAME broker+size+price for any non-HOLD action.
+   GOOD: "IBKR limit buy 10 NUCL @ $52, стоп $48".
+   Empty "—" acceptable ONLY for HOLD/WAIT/AVOID.
 
-6. PRICE SANITY
-   - Asset label not in the market data block → KILL (hallucinated).
-   - Price way off (>20%) from market data for the same asset → KILL.
+6. prediction — 1-2 sentences with realistic upcoming dates (next 1-4
+   weeks) and concrete price targets/triggers. No 2024-dated events.
+   BAD: "Следить за CPI и FOMC".
+   GOOD: "Жду $44-48 до 15 июня; пробой $50 → $58, провал $43 — стоп".
 
-NOTES FIELD DISCIPLINE:
-- For WEAKEN, name the SPECIFIC fix: "do_now too vague — rewrite as
-  imperative Russian action", "add broker+size to how_to_execute",
-  "swap XYZ scenario for a GOLD scenario (user holds 1oz)".
-- For KILL, explain why it's unsalvageable.
+CONSISTENCY (auto-WEAKEN if violated):
+- action=BUY/ADD but critic_bear dominates critic_bull → WEAKEN.
+- action=SELL/TRIM but is_portfolio_holding=False → KILL (can't sell what
+  you don't hold).
+- action=ADD but is_portfolio_holding=False → WEAKEN (should be BUY).
+
+PRICE SANITY:
+- Asset not in market data → KILL.
+- Price off >20% from market_data for same asset → KILL.
+
+CALIBRATION TARGET (Maksim asked for stricter critic — current runs
+PASS too easily):
+- Healthy run: 20-40% WEAKEN, 50-70% PASS, 0-10% KILL, 5-15% STRONG_PASS.
+- If your last batch was >70% PASS — you under-rejected. Default toward
+  WEAKEN on anything generic/templatey.
+
+IGNORE LEGACY FIELDS (do NOT validate them, they're deprecated):
+  bull_scenario, bull_prob, bull_trigger, bear_scenario, bear_prob,
+  bear_trigger, key_events, geopolitical_note, post_action, action_reason,
+  market_situation, critic_risk, future_outlook.
+The renderer does not show them — checking them wastes tokens.
+
+AUTO-FILLER NOTE: scenarios with critic_notes containing
+"auto-filled HOLD card" are server-generated placeholders. Treat them
+leniently — PASS unless they have a real error. Do NOT WEAKEN them just
+because critic_bull/bear sounds templatey; they intentionally come from
+per-asset templates and the improve-mode rewriter cannot make them
+better without real signal input.
+
+NOTES FIELD:
+- For WEAKEN, name the SPECIFIC fix (≤300 chars).
+- For KILL, explain why unsalvageable.
 - For PASS/STRONG_PASS, one-line justification.
 
-Goal: filter 3-5 raw scenarios down to 3-5 actually-useful briefs.
-Default toward WEAKEN on anything vague. Be ruthless — Maksim has
-seen enough "interesting setup" cards.
-
-Return one verdict PER input scenario, indexed by 1-based position.
-Respond ONLY with valid JSON.
+Return ONE verdict per input scenario, 1-based index. JSON only.
 """
 
 
@@ -137,7 +155,11 @@ Respond ONLY with valid JSON.
 
 
 def format_scenarios_for_critic(scenarios: list[dict]) -> str:
-    """Compact representation of each scenario for the critic."""
+    """Compact representation of each scenario for the critic.
+
+    Only the NEW (rendered) fields are shown. Legacy fields are skipped
+    to save tokens and stop the critic from validating them.
+    """
     lines: list[str] = []
     for i, s in enumerate(scenarios, start=1):
         asset = s.get("asset", "?")
@@ -146,26 +168,28 @@ def format_scenarios_for_critic(scenarios: list[dict]) -> str:
         price = s.get("price", "?")
         c24 = s.get("change_24h", 0)
         c7d = s.get("change_7d", 0)
-        strength = s.get("strength", "?")
-        bull = s.get("bull_prob", 0)
-        bear = s.get("bear_prob", 0)
-        tf = s.get("timeframe", "?")
+        is_filler = "auto-filled" in (s.get("critic_notes") or "")
 
+        news = (s.get("news_highlights") or [])[:3]
+        trend = (s.get("trend") or "").strip()[:240]
+        bull = (s.get("critic_bull") or "").strip()[:240]
+        bear = (s.get("critic_bear") or "").strip()[:240]
+        prediction = (s.get("prediction") or "").strip()[:240]
         do_now = (s.get("do_now") or "").strip()[:200]
         how_to = (s.get("how_to_execute") or "").strip()[:200]
         why_now = (s.get("why_now_short") or "").strip()[:200]
-        post = (s.get("post_action") or "").strip()[:200]
-        bear_trig = (s.get("bear_trigger") or "").strip()[:120]
-        events = ", ".join((s.get("key_events") or [])[:4])
 
-        lines.append(f"#{i} {asset} · action={action} · held={held} · str={strength}/10 · tf={tf}")
-        lines.append(f"   price=${price} ({c24:+.1f}% 24h / {c7d:+.1f}% 7d) · bull={bull}% bear={bear}%")
+        filler_tag = " · AUTO-FILLER (be lenient)" if is_filler else ""
+        lines.append(f"#{i} {asset} · action={action} · held={held}{filler_tag}")
+        lines.append(f"   price=${price} ({c24:+.1f}% 24h / {c7d:+.1f}% 7d)")
+        lines.append(f"   news: {' | '.join(n[:80] for n in news) if news else '(empty)'}")
+        lines.append(f"   trend: {trend}")
+        lines.append(f"   bull: {bull}")
+        lines.append(f"   bear: {bear}")
+        lines.append(f"   prediction: {prediction}")
         lines.append(f"   do_now: {do_now}")
         lines.append(f"   how_to_execute: {how_to}")
         lines.append(f"   why_now_short: {why_now}")
-        lines.append(f"   post_action: {post}")
-        lines.append(f"   bear_trigger: {bear_trig}")
-        lines.append(f"   key_events: {events}")
     return "\n".join(lines)
 
 

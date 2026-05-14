@@ -88,8 +88,15 @@ real competitors, name real failure modes.
 For each idea, attack along these 5 axes:
 
 1. COMPETITORS — "This already exists as [X.com] and [Y.com]." Try to recall
-   actual products in the same niche. If a dominant direct competitor exists
-   in the exact same niche with the exact same buyer, KILL.
+   actual products in the same niche. KILL only if the SAME-segment, SAME-
+   pricepoint, SAME-buyer competitor exists. CRITICAL DISTINCTION:
+   • Enterprise-grade software (Drata, Salesforce, Workday, Exostar, SAP)
+     is NOT a competitor to an SMB / mid-market / indie-hacker tool. They
+     serve $500k+/yr deal-cycles; SMB buys $50-200/mo without procurement.
+   • OS giants (Microsoft, Google, Apple bundled features) ARE competitors
+     ONLY if they ship the SAME workflow to the SAME buyer for free.
+   • If competitors exist but in a DIFFERENT segment (enterprise vs SMB,
+     B2C vs B2B), this is WEAKEN at worst, often PASS.
 
 2. CUSTOMER PATH — "Who exactly pays $X/month? Name 3 real companies."
    If Maksim cannot realistically reach the first 100 paying customers in
@@ -108,20 +115,37 @@ For each idea, attack along these 5 axes:
    4 weeks?" If there's no defensible moat (proprietary data, deep workflow
    embedding, network effect, niche expertise), KILL.
 
+AI-TOOLS PENALTY (Maksim explicit ask — STOP defaulting to AI for everything):
+If idea.industry == "ai_tools" or title contains "AI X" / "AI-powered" / "AI
+for", apply STRICTER bar — confidence must be ≥75 to PASS. If conf < 75 AND
+no defensible moat (proprietary data, deep workflow lock-in, niche expertise),
+KILL or WEAKEN regardless of how cute the demo sounds. Reason: he's seen
+"AI for X" hundreds of times and doesn't want another one unless it's
+genuinely defensible.
+
 VERDICTS (one per idea, MUST be one of these four):
 
   KILL          Fatal flaw above. No path to viability. Drop permanently.
   WEAKEN        Salvageable but has specific issues. The idea generator will
                 rewrite this idea on the next round using your `notes` as the
                 instruction. Be SPECIFIC in notes — name what to fix.
+                If competitors are wrong-segment, prefer WEAKEN (let
+                generator narrow the niche) over KILL.
   PASS          Solid. Acceptable. Not exceptional but worth shipping.
-  STRONG_PASS   No dominant direct competitor in the SPECIFIC niche AND clear
-                path to first 10 customers AND timing tied to a recent signal
-                AND Maksim's RAG/LangGraph/LLM skills give a real advantage.
+  STRONG_PASS   No dominant SAME-SEGMENT competitor AND clear path to first
+                10 customers AND timing tied to a recent signal AND Maksim's
+                stack (Python/RAG/scraping/Telegram bots/web) fits.
 
-Per the user's spec: "3 great ideas beat 10 mediocre ones." Be RUTHLESS.
-Default toward KILL or WEAKEN unless the idea is genuinely strong. The
-goal is to filter ~10 raw drafts down to ~3 strong survivors.
+CALIBRATION (Maksim's updated target — was too strict, killing too many):
+Healthy run = 10-20% KILL, 20-30% WEAKEN, 50-65% PASS, 5-15% STRONG_PASS.
+If your last batch hit >30% KILL, you over-rejected — reset toward WEAKEN.
+
+Default toward PASS when you're uncertain. The downstream `/more` command
+needs at least 4-5 surviving ideas to give Maksim variety; if you reduce
+the batch to 1-2 survivors, his `/more` pool is empty.
+
+Wrong-segment competitors (enterprise vs SMB) = WEAKEN, NOT KILL.
+A real-but-narrow niche with no dominant SMB competitor = PASS, NOT KILL.
 
 Notes field (≤400 chars): for KILL, explain WHY it dies (which competitor,
 which OpenAI feature, which customer-path failure). For WEAKEN, give SPECIFIC

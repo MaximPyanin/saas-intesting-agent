@@ -94,9 +94,16 @@ async def set_pause_days(days: int) -> str:
 
 
 async def morning_brief_job(application: "Application") -> None:
-    """Fast morning brief — market collector + top 3 breaking signals from DB.
+    """Morning brief at 07:00 Warsaw — two sections:
 
-    No LLM call, no full graph. Target latency: ~5 seconds total.
+      A. 🚨 СРОЧНО — active alerts right now + recent fires (overnight)
+      B. 💼 Совет по портфелю — per-holding HOLD/TRIM/ADD/WATCH advice
+
+    The legacy market snapshot (gold/BTC/SP500/oil/VIX) is REPLACED by these
+    two more actionable sections per Maksim's request.
+
+    Latency target: ~10-15s total (one cheap gpt-4o-mini call for the
+    portfolio advice + market fetch). Cost: ~$0.02-0.05 per morning.
     """
     log.info("scheduler: morning_brief_job firing")
 
@@ -111,86 +118,110 @@ async def morning_brief_job(application: "Application") -> None:
 
     # Lazy imports to avoid circular issues and keep scheduler light at startup
     from .agents.market import collect_market_data
-    from .bot.views import render_morning_brief
+    from .agents.portfolio_advisor import generate_morning_portfolio_advice
+    from .alerts import get_active_alerts_no_dedup, get_recently_fired_alerts
+    from .bot.views import (
+        render_portfolio_morning_advice,
+        render_urgent_section,
+    )
+    from .portfolio import get_portfolio_with_pnl
 
-    # 1. Fast market snapshot
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. Fast market snapshot (needed for both alerts AND portfolio P&L)
     try:
         market_data, market_errors = await collect_market_data()
     except Exception as e:  # noqa: BLE001
         log.error("scheduler: morning market fetch failed: %s", e)
         market_data, market_errors = {}, [str(e)]
 
-    # 2. Top breaking signals from DB (signals written by scout/trend on last digest run)
-    breaking: list[dict] = []
+    # 2. Build СРОЧНО section
+    try:
+        active_hits = await get_active_alerts_no_dedup(market_data)
+    except Exception as e:  # noqa: BLE001
+        log.error("scheduler: alerts (no-dedup) failed: %s", e)
+        active_hits = []
+    try:
+        recent_fires = await get_recently_fired_alerts(hours=12)
+    except Exception as e:  # noqa: BLE001
+        log.error("scheduler: recent-fires fetch failed: %s", e)
+        recent_fires = []
+
+    # Top breaking news from last 12h (DB query — fast)
+    breaking_news: list[dict] = []
     try:
         async with get_db() as conn:
             async with conn.execute(
-                """SELECT title, source_id, url FROM signals
+                """SELECT title, source_id, url
+                   FROM signals
                    WHERE is_breaking = 1
-                   ORDER BY published_at DESC LIMIT 5"""
+                     AND datetime(published_at) >= datetime('now', '-12 hours')
+                   ORDER BY published_at DESC
+                   LIMIT 4"""
             ) as cur:
-                breaking = [dict(r) for r in await cur.fetchall()]
+                breaking_news = [dict(r) for r in await cur.fetchall()]
     except Exception as e:  # noqa: BLE001
-        log.error("scheduler: failed to read breaking signals: %s", e)
+        log.error("scheduler: breaking news fetch failed: %s", e)
 
-    # 3. Format
-    def _price(cat: str, key: str, fmt: str = "${price:,.0f}") -> str:
-        d = market_data.get(cat, {}).get(key, {})
-        try:
-            return fmt.format(price=d.get("price", 0))
-        except Exception:
-            return "n/a"
-
-    def _pct(cat: str, key: str) -> str:
-        d = market_data.get(cat, {}).get(key, {})
-        try:
-            return f"{d.get('change_24h', 0):+.1f}%"
-        except Exception:
-            return "n/a"
-
-    events_text = (
-        "\n".join(f"• {s['title']}" for s in breaking[:3])
-        if breaking
-        else "• (no breaking news overnight)"
+    # Portfolio holdings with biggest 24h moves (|change| >= 2%)
+    portfolio_for_urgent = await get_portfolio_with_pnl(market_data)
+    portfolio_movers = sorted(
+        [
+            h for h in (portfolio_for_urgent.get("holdings") or [])
+            if h.get("change_24h_pct") is not None
+            and abs(h.get("change_24h_pct") or 0) >= 2.0
+        ],
+        key=lambda h: abs(h.get("change_24h_pct") or 0),
+        reverse=True,
     )
-    key_signal = breaking[0]["title"] if breaking else "(calm overnight, no breaking news)"
 
-    data = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "breaking_emoji": "🔴" if breaking else "🟢",
-        "top_3_events": events_text,
-        "gold": _price("commodities", "GOLD").lstrip("$"),
-        "gold_pct": _pct("commodities", "GOLD"),
-        "btc": _price("crypto", "BTC").lstrip("$"),
-        "btc_pct": _pct("crypto", "BTC"),
-        "sp500": _price("equities", "SPY", "${price:.2f}").lstrip("$"),
-        "sp500_pct": _pct("equities", "SPY"),
-        "oil": _price("commodities", "OIL_WTI", "${price:.2f}").lstrip("$"),
-        "oil_pct": _pct("commodities", "OIL_WTI"),
-        "vix": _price("indices", "VIX", "{price:.1f}"),
-        "key_signal_one_liner": key_signal,
-    }
+    urgent_text = render_urgent_section(
+        active_hits, recent_fires,
+        date=today_iso,
+        breaking_news=breaking_news,
+        portfolio_movers=portfolio_movers,
+    )
 
-    text = render_morning_brief(data)
-
-    # 4. Deliver
     try:
         await application.bot.send_message(
             chat_id=settings.telegram_chat_id,
-            text=text,
+            text=urgent_text,
             parse_mode="HTML",
         )
     except Exception as e:  # noqa: BLE001
-        log.error("scheduler: morning delivery failed: %s", e)
+        log.error("scheduler: morning urgent-section delivery failed: %s", e)
+
+    # 3. Build portfolio advice section (reuse the portfolio we already fetched)
+    portfolio = portfolio_for_urgent
+
+    try:
+        advice = await generate_morning_portfolio_advice(portfolio)
+    except Exception as e:  # noqa: BLE001
+        log.error("scheduler: portfolio_advisor failed: %s — using fallback", e)
+        advice = []
+
+    advice_text = render_portfolio_morning_advice(advice, portfolio, date=today_iso)
+
+    try:
+        await application.bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=advice_text,
+            parse_mode="HTML",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("scheduler: morning portfolio-advice delivery failed: %s", e)
         return
 
-    # 5. Update last_morning_at
+    # 4. Update last_morning_at
     await _upsert_weight(
         "last_morning_at", None,
         datetime.now(timezone.utc).isoformat(),
-        "morning brief delivered",
+        "morning brief delivered (urgent + portfolio advice)",
     )
-    log.info("scheduler: morning brief delivered (%d breaking signals)", len(breaking))
+    log.info(
+        "scheduler: morning brief delivered (%d active alerts · %d overnight fires · %d holdings)",
+        len(active_hits), len(recent_fires), len(portfolio.get("holdings") or []),
+    )
 
 
 # ============================================================================
@@ -289,7 +320,7 @@ async def evening_digest_job(application: "Application") -> None:
             text=(
                 f"🦉 <b>Evening Digest</b> · <code>#{digest_id}</code>\n"
                 f"{len(ideas)} business ideas · {len(signals)} investment signals\n"
-                f"<i>Tap buttons to give feedback — learning calibration runs every 30 feedbacks.</i>"
+                f"<i>Tap buttons to give feedback — learning calibration runs every 20 feedbacks.</i>"
             ),
             parse_mode="HTML",
         )

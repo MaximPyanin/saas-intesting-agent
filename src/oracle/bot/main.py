@@ -40,11 +40,27 @@ from ..config import get_settings
 from ..db import init_db
 from ..scheduler import setup_scheduler, shutdown_scheduler
 from .handlers import (
+    ASK_ADJUST_AMOUNT,
     ASK_CATEGORY,
     ASK_CONFIRM,
+    ASK_HOLDING_PRICE,
+    ASK_HOLDING_QTY,
     ASK_NAME,
+    ASK_NEW_AMOUNT,
     ASK_TYPE,
     ASK_URL,
+    PICK_NEW_TICKER,
+    add_holding_callback_entry,
+    add_holding_cancel_cmd,
+    add_holding_price,
+    add_holding_qty,
+    pf_addnew_amount,
+    pf_addnew_cancel_cmd,
+    pf_addnew_entry,
+    pf_addnew_pick,
+    pf_adjust_amount,
+    pf_adjust_callback_entry,
+    pf_adjust_cancel_cmd,
     add_source_callback_entry,
     add_source_cancel_cb,
     add_source_cancel_cmd,
@@ -57,11 +73,15 @@ from .handlers import (
     cmd_add_holding,
     cmd_add_source,
     cmd_calibrate,
+    cmd_clearfeedback,
     cmd_cost,
     cmd_digest,
     cmd_history,
+    cmd_lastdigest,
+    cmd_more,
     cmd_morning,
     cmd_pause,
+    cmd_preferences,
     cmd_portfolio,
     cmd_remove_holding,
     cmd_saved,
@@ -139,15 +159,79 @@ def build_application():
     )
     app.add_handler(add_source_conv)
 
+    # Add-to-portfolio ConversationHandler (Step 20.5).
+    # Triggered by "➕ В мой портфель" button under each investment card.
+    # Registered BEFORE the generic CallbackQueryHandler so it captures the
+    # `inv_add_<sig_id>` pattern first.
+    add_holding_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(add_holding_callback_entry, pattern="^inv_add_"),
+        ],
+        states={
+            ASK_HOLDING_QTY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_holding_qty),
+            ],
+            ASK_HOLDING_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_holding_price),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", add_holding_cancel_cmd)],
+        per_chat=True,
+        per_user=True,
+    )
+    app.add_handler(add_holding_conv)
+
+    # Portfolio adjust (+$/-$) ConversationHandler.
+    # Captures pf_addusd_<LABEL> and pf_subusd_<LABEL> callbacks before the
+    # generic dispatcher, then asks for amount via text.
+    pf_adjust_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(pf_adjust_callback_entry, pattern="^pf_(addusd|subusd)_"),
+        ],
+        states={
+            ASK_ADJUST_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, pf_adjust_amount),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", pf_adjust_cancel_cmd)],
+        per_chat=True,
+        per_user=True,
+    )
+    app.add_handler(pf_adjust_conv)
+
+    # Portfolio "add new position from scratch" ConversationHandler.
+    # Triggered by `pf_addnew` button under /portfolio footer.
+    pf_addnew_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(pf_addnew_entry, pattern="^pf_addnew$"),
+        ],
+        states={
+            PICK_NEW_TICKER: [
+                CallbackQueryHandler(pf_addnew_pick, pattern="^pf_pick_"),
+            ],
+            ASK_NEW_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, pf_addnew_amount),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", pf_addnew_cancel_cmd)],
+        per_chat=True,
+        per_user=True,
+    )
+    app.add_handler(pf_addnew_conv)
+
     # Other slash commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("digest", cmd_digest))
+    app.add_handler(CommandHandler("more", cmd_more))
+    app.add_handler(CommandHandler("lastdigest", cmd_lastdigest))
+    app.add_handler(CommandHandler("preferences", cmd_preferences))
     app.add_handler(CommandHandler("morning", cmd_morning))
     app.add_handler(CommandHandler("sources", cmd_sources))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("saved", cmd_saved))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("calibrate", cmd_calibrate))  # Step 14
+    app.add_handler(CommandHandler("clearfeedback", cmd_clearfeedback))
     app.add_handler(CommandHandler("cost", cmd_cost))            # Step 17
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("pause", cmd_pause))
