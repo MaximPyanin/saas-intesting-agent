@@ -8,6 +8,7 @@ or scraped content can never break the markup.
 from __future__ import annotations
 
 import html
+import math
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -98,7 +99,7 @@ IDEA_CARD_TEMPLATE = """\
 
 INVESTMENT_CARD_TEMPLATE = """\
 🏷️ <b>{display_name}</b>
-💵 ${price}  ·  📉 {change_24h} (24h)
+💵 ${price}  ·  📉 {change_display}
 {portfolio_line}━━━━━━━━━━━━━━━━━━
 
 📰 <b>Новости:</b>
@@ -316,19 +317,24 @@ def render_portfolio_morning_advice(
         text = getattr(adv, "advice_short", "")
         h = holdings_by_label.get(asset.upper(), {})
 
-        # Prefer 24h live change over P&L drift — much more informative
-        # for "what happened today" morning view.
-        c24 = h.get("change_24h_pct")
-        if c24 is not None:
-            sign = "+" if c24 >= 0 else ""
-            move_str = f"{sign}{c24:.1f}%"
-        else:
-            pnl_pct = h.get("pnl_pct")
-            if pnl_pct is None:
-                move_str = "—"
-            else:
-                sign = "+" if pnl_pct >= 0 else ""
-                move_str = f"{sign}{pnl_pct:.1f}%"
+        # Prefer 24h live change over P&L drift — more informative for "what
+        # happened today" morning view. Guard against NaN/None which yfinance
+        # can produce when markets are closed.
+        def _fmt_pct(v) -> str | None:
+            if v is None:
+                return None
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            if math.isnan(f) or math.isinf(f):
+                return None
+            sign = "+" if f >= 0 else ""
+            return f"{sign}{f:.1f}%"
+
+        move_str = _fmt_pct(h.get("change_24h_pct")) \
+            or _fmt_pct(h.get("pnl_pct")) \
+            or "—"
 
         emoji = _ACTION_EMOJI.get(action, "•")
         # 2-line format keeps human-readable names readable without forcing
@@ -339,9 +345,22 @@ def render_portfolio_morning_advice(
         )
 
     totals = portfolio.get("totals") or {}
-    mv = totals.get("market_value_usd") or 0.0
-    pnl = totals.get("unrealized_pnl_usd") or 0.0
-    pnl_pct = totals.get("pnl_pct") or 0.0
+
+    def _safe_num(v, default=0.0) -> float:
+        """Coerce to float; NaN/Inf/None → default."""
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            if math.isnan(f) or math.isinf(f):
+                return default
+            return f
+        except (TypeError, ValueError):
+            return default
+
+    mv = _safe_num(totals.get("market_value_usd"))
+    pnl = _safe_num(totals.get("unrealized_pnl_usd"))
+    pnl_pct = _safe_num(totals.get("pnl_pct"))
     sign = "+" if pnl >= 0 else ""
     lines.append("─" * 25)
     lines.append(
@@ -491,10 +510,22 @@ def render_investment_card(sig: InvestmentSignal, n: int) -> str:
     else:
         verdict_exec_line = ""
 
+    # Smart 24h display: if 24h is effectively flat but 7d has movement,
+    # show the 7d number with a label — users complained that "+0.0% (24h)"
+    # looks broken on short-duration bond ETFs like IB01 that genuinely
+    # don't move day-to-day. Threshold = 0.05% (any smaller is yfinance
+    # rounding noise on illiquid UCITS tickers).
+    c24 = sig.change_24h
+    c7d = getattr(sig, "change_7d", 0.0) or 0.0
+    if abs(c24) < 0.05 and abs(c7d) >= 0.05:
+        change_display = f"{c7d:+.1f}% (7d)"
+    else:
+        change_display = f"{c24:+.1f}% (24h)"
+
     return INVESTMENT_CARD_TEMPLATE.format(
         display_name=_esc(display_name(sig.asset)),
         price=_esc(f"{sig.price:,.2f}"),
-        change_24h=_esc(f"{sig.change_24h:+.1f}%"),
+        change_display=_esc(change_display),
         portfolio_line=portfolio_line,
         news_block=news_block,
         trend=_esc(trend) if not trend.startswith("<i>") else trend,

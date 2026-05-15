@@ -571,6 +571,15 @@ def _to_usd(price: float, currency: str, market_data: dict) -> float:
     return float(price)
 
 
+# Off-broker / custom assets that don't appear in any market_data bucket
+# directly. We proxy them to a tradable underlying so the cards show real
+# price + 24h/7d changes instead of $0.00 / +0.0%. GOLD-PHYS = spot gold
+# (GOLD ticker, GLD ETF). CASH-USD is handled specially (always $1.00).
+ASSET_PRICE_PROXIES: dict[str, str] = {
+    "GOLD-PHYS": "GOLD",   # physical gold tracks spot gold
+}
+
+
 def _lookup_current_price(asset_label: str, market_data: dict) -> float | None:
     """Find the live USD price for asset_label across all market_data buckets.
 
@@ -578,7 +587,29 @@ def _lookup_current_price(asset_label: str, market_data: dict) -> float | None:
     IB01) we apply EU_UCITS_CURRENCY → USD conversion via live forex rates
     so all downstream P&L math stays in USD. Other buckets are assumed USD-
     native (yfinance default for US-listed tickers).
+
+    Custom off-broker assets (GOLD-PHYS) are resolved via ASSET_PRICE_PROXIES
+    so we get real spot prices instead of $0.00.
     """
+    # Hard-coded cash equivalents — always $1.00 USD
+    if asset_label == "CASH-USD":
+        return 1.0
+
+    # Try the asset directly across all known buckets
+    price = _raw_price_in_buckets(asset_label, market_data)
+    if price is not None:
+        return price
+
+    # Fall back to a proxy ticker (e.g. GOLD-PHYS → GOLD spot)
+    proxy = ASSET_PRICE_PROXIES.get(asset_label)
+    if proxy:
+        return _raw_price_in_buckets(proxy, market_data)
+    return None
+
+
+def _raw_price_in_buckets(asset_label: str, market_data: dict) -> float | None:
+    """Internal helper: scan all market_data buckets for asset_label and
+    return the live USD-converted price, or None if not found anywhere."""
     for bucket_key in (
         "equities",
         "stocks",
@@ -593,11 +624,8 @@ def _lookup_current_price(asset_label: str, market_data: dict) -> float | None:
     ):
         bucket = market_data.get(bucket_key) or {}
         if asset_label in bucket:
-            try:
-                raw_price = float(bucket[asset_label].get("price", 0)) or None
-            except (TypeError, ValueError):
-                return None
-            if raw_price is None:
+            raw_price = _safe_float(bucket[asset_label].get("price"))
+            if raw_price is None or raw_price <= 0:
                 return None
             # Only EU-UCITS bucket needs currency conversion
             if bucket_key == "eu_ucits":
@@ -613,7 +641,28 @@ def _lookup_market_metrics(asset_label: str, market_data: dict) -> dict[str, flo
     These are LIVE movement numbers (not P&L drift from entry) — Maksim's
     morning advisor needs them to write actionable HOLD/TRIM/ADD advice
     based on what happened TODAY, not just months ago at entry.
+
+    Off-broker assets (GOLD-PHYS, CASH-USD) are resolved via proxies or
+    hard-coded zeros so the cards don't show +0.0% by default.
     """
+    # Cash has no daily movement — explicit zeros
+    if asset_label == "CASH-USD":
+        return {"change_24h": 0.0, "change_7d": 0.0}
+
+    # Direct match first
+    metrics = _raw_metrics_in_buckets(asset_label, market_data)
+    if metrics["change_24h"] is not None or metrics["change_7d"] is not None:
+        return metrics
+
+    # Proxy fallback (GOLD-PHYS → GOLD)
+    proxy = ASSET_PRICE_PROXIES.get(asset_label)
+    if proxy:
+        return _raw_metrics_in_buckets(proxy, market_data)
+    return {"change_24h": None, "change_7d": None}
+
+
+def _raw_metrics_in_buckets(asset_label: str, market_data: dict) -> dict[str, float | None]:
+    """Internal helper: scan all market_data buckets for change_24h/change_7d."""
     for bucket_key in (
         "equities", "stocks", "nuclear", "drones_defense",
         "trump_political", "commodities", "forex", "indices",
@@ -630,10 +679,17 @@ def _lookup_market_metrics(asset_label: str, market_data: dict) -> dict[str, flo
 
 
 def _safe_float(v) -> float | None:
+    """Coerce to float, reject NaN/Inf (yfinance returns NaN on closed
+    markets / pre-IPO / illiquid UCITS — propagating it crashes formatting
+    and totals math)."""
     if v is None:
         return None
     try:
-        return float(v)
+        import math  # noqa: PLC0415
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
     except (TypeError, ValueError):
         return None
 
@@ -683,11 +739,15 @@ def compute_pnl(
     # Mode B: USD-only position (qty=0, usd_invested set) — drift from snapshot
     if (qty <= 0) and usd_invested:
         cost_basis = float(usd_invested)
-        if current is not None and price_at_add and price_at_add > 0:
+        # current may already be None (caught by _lookup_current_price), but
+        # _safe_float'd price_at_add may also be NaN from a bad seed.
+        price_at_add_f = _safe_float(price_at_add)
+        current_f = _safe_float(current)
+        if current_f is not None and price_at_add_f and price_at_add_f > 0:
             # Approximate: scale invested $ by relative price change since add
-            drift_pct = (current / float(price_at_add) - 1.0) * 100.0
-            market_value = cost_basis * (current / float(price_at_add))
-            enriched["current_price"] = current
+            drift_pct = (current_f / price_at_add_f - 1.0) * 100.0
+            market_value = cost_basis * (current_f / price_at_add_f)
+            enriched["current_price"] = current_f
             enriched["market_value_usd"] = market_value
             enriched["cost_basis_usd"] = cost_basis
             enriched["unrealized_pnl_usd"] = market_value - cost_basis

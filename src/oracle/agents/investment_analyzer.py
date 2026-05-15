@@ -1021,6 +1021,7 @@ async def _build_hold_fillers(missing_holdings: list[dict]) -> list:
         current_price = h.get("current_price") or 0.0
         pnl_pct = h.get("pnl_pct")
         c24 = h.get("change_24h_pct") or 0.0
+        c7d = h.get("change_7d_pct") or 0.0
         pnl_note = (
             f"твоя позиция {'+' if (pnl_pct or 0) >= 0 else ''}{(pnl_pct or 0):.1f}% от входа"
             if pnl_pct is not None
@@ -1036,7 +1037,7 @@ async def _build_hold_fillers(missing_holdings: list[dict]) -> list:
                 asset=label,
                 price=float(current_price) if current_price else 0.0,
                 change_24h=float(c24),
-                change_7d=0.0,
+                change_7d=float(c7d),
                 strength=4,
                 timeframe="1-3 months",
                 news_highlights=news,

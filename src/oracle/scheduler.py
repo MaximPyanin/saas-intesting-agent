@@ -389,7 +389,11 @@ def setup_scheduler(application: "Application") -> AsyncIOScheduler:
     # Morning brief — 07:00 Warsaw local
     scheduler.add_job(
         morning_brief_job,
-        trigger=CronTrigger(hour=7, minute=0, timezone=tz_name),
+        # 09:30 Warsaw — после открытия EU бирж (London 09:00 BST,
+        # Xetra/Milan/SIX 09:00 CET) yfinance уже имеет свежие котировки
+        # для UCITS-тикеров (CSPX/SMH/NATO/NUCL/EXH1/IB1T/IB01). На 07:00
+        # они возвращали NaN потому что биржи ещё закрыты.
+        trigger=CronTrigger(hour=9, minute=30, timezone=tz_name),
         args=[application],
         id="morning_brief",
         name="ORACLE morning brief",

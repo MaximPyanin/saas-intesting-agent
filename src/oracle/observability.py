@@ -192,11 +192,14 @@ def get_openai_client(agent: str = "") -> Any:
     settings = get_settings()
 
     # Hard timeout for every LLM call — prevents the bot from hanging when
-    # Azure / OpenAI lazes on a complex structured-output request. 120 s is
-    # generous (most calls finish in 5-15 s) but short enough to fail fast.
-    # On timeout the SDK raises APITimeoutError which agent code catches and
-    # gracefully degrades (e.g. returns empty scenarios list).
-    LLM_TIMEOUT_SECONDS = 120.0
+    # Azure / OpenAI lazes on a complex structured-output request.
+    # 300 s (5 min) accommodates the heavy idea_generator system prompt
+    # (~26 KB, 10 meta-rules) producing 8-12 complex BusinessIdea drafts —
+    # 120 s timed out reproducibly in production on 2026-05-15. Most calls
+    # still finish in 5-30 s; this is just headroom for the slowest case.
+    # On timeout the SDK raises APITimeoutError which agent code catches
+    # and gracefully degrades (e.g. returns empty scenarios list).
+    LLM_TIMEOUT_SECONDS = 300.0
 
     # ---------- Azure OpenAI / Azure AI Foundry path ----------
     if settings.azure_openai_endpoint:
